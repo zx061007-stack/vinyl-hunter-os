@@ -184,12 +184,33 @@
     });
   }
 
+  // AI 分析：通过用户自部署的 Worker 代理调用 AI（DeepSeek 等）。
+  // Worker 持有 API Key（服务端密钥），前端只传 module / systemPrompt / userPrompt / data。
+  // 仅在用户点击【AI分析】按钮时调用——按钮触发，不自动联网，不后台运行。
+  // proxyUrl 形如 https://你的worker.dev/ai-analyze
+  // 返回 { ok:true, result:"分析文本", model:"...", usage:{...} } 或 { ok:false, error:"..." }
+  function fetchAIAnalysis(proxyUrl, payload) {
+    if (!proxyUrl) return Promise.reject(new Error('未配置 AI 分析代理地址'));
+    return fetch(proxyUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    }).then(function (r) {
+      if (!r.ok) throw new Error('AI 代理返回 ' + r.status);
+      return r.json();
+    }).then(function (d) {
+      if (d && d.error) throw new Error(d.error);
+      return d;
+    });
+  }
+
   global.VHAPI = {
     fetchExchangeRates: fetchExchangeRates,
     fetchDiscogs: fetchDiscogs,
     fetchDiscogsRelease: fetchDiscogsRelease,
     fetchJson: fetchJson,
     fetchMusicBrainzNews: fetchMusicBrainzNews,
-    fetchChinaHotWords: fetchChinaHotWords
+    fetchChinaHotWords: fetchChinaHotWords,
+    fetchAIAnalysis: fetchAIAnalysis
   };
 })(window);

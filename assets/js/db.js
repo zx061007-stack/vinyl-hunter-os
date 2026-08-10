@@ -7,7 +7,7 @@
   'use strict';
 
   var DB_NAME = 'vinyl_hunter_os';
-  var DB_VERSION = 2;
+  var DB_VERSION = 3;
 
   // 所有对象仓库（已按精简后的 17 个模块裁剪；选品评分+套利分析已合并为 full_analysis）
   var STORES = [
@@ -23,6 +23,7 @@
     'full_analysis',   // 黑胶全分析记录（合并原选品评分+套利分析）(auto id)
     'inventory',       // 库存记录 (auto id)
     'crm',             // 客户 CRM (auto id)
+    'ai_analyses',     // AI 分析结果（全局，按模块+时间）(auto id)
     'settings'         // 系统设置 (key=__key)
   ];
 

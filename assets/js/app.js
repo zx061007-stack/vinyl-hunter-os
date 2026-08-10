@@ -126,6 +126,7 @@
       '    </div></div>' +
       '  <div class="form-wrap hidden" id="formWrap"></div>' +
       '  <div class="list-wrap" id="listWrap"><div class="empty">加载中…</div></div>' +
+      (cfg.ai ? aiSectionHTML(cfg.ai) : '') +
       '</div>'
     );
     var listWrap = node.querySelector('#listWrap');
@@ -223,6 +224,7 @@
     }
     node.querySelector('#addBtn').onclick = function () { editingId = null; buildForm({}); };
 
+    if (cfg.ai) bindAI(node, cfg.ai);
     return { node: node, refresh: refresh };
   }
 
@@ -371,7 +373,7 @@
       cols: ['buyPrice', 'sellPrice']
     },
     expense: {
-      title: '消费记账', store: 'expenses',
+      title: '消费记账', store: 'expenses', ai: 'expense',
       fields: [
         { k: 'date', l: '日期', t: 'text' },
         { k: 'amount', l: '金额', t: 'number' },
@@ -382,6 +384,493 @@
   };
   // 注：discogs / inventory / crm 已改为自定义联动模块（见 buildDiscogs / buildInventory / buildCrm），
   // 不再使用通用 createRecordManager。
+
+  /* ==================== AI 智能分析系统（全局） ====================
+   * 所有 AI 分析必须由用户点击【AI分析】按钮触发。
+   * 禁止：自动分析、后台运行、打开页面自动调用——避免 Token 浪费。
+   * 配置了「AI分析代理地址」→ 通过 Worker 调真实 AI（DeepSeek 等），Key 在 Worker 端。
+   * 未配置 → 走本地确定性分析（不消耗 Token，结果明确标注数据来源）。
+   * 所有结果永久保存到 IndexedDB（ai_analyses 仓库），刷新/关浏览器不丢失。
+   * =================================================================== */
+
+  var AI_CONFIGS = {
+    plan: {
+      label: 'AI分析今日执行情况',
+      collect: function () {
+        return VHDB.get('daily_plans', todayStr()).then(function (rec) {
+          return rec || { date: todayStr(), tasks: [] };
+        });
+      },
+      prompt: function (d) {
+        return {
+          system: '你是黑胶商业工作台的AI助手。分析用户今日计划执行情况，输出：任务完成率、完成习惯、执行效率、拖延问题、下一步优化建议。用中文，结构清晰。',
+          user: '今日计划数据：\n' + JSON.stringify(d, null, 2)
+        };
+      },
+      local: function (d) {
+        var tasks = d.tasks || [];
+        var done = tasks.filter(function (t) { return t.done; }).length;
+        var rate = tasks.length ? Math.round(done / tasks.length * 100) : 0;
+        var pending = tasks.filter(function (t) { return !t.done; }).map(function (t) { return '· ' + t.text; }).join('\n');
+        var s = '【今日执行情况分析】\n\n';
+        s += '一、任务完成率\n完成任务 ' + done + '/' + tasks.length + '，完成率 ' + rate + '%。\n';
+        s += rate >= 80 ? '执行率优秀，保持节奏。\n\n' : rate >= 50 ? '执行率中等，部分任务需跟进。\n\n' : '执行率偏低，需关注拖延问题。\n\n';
+        s += '二、完成习惯分析\n';
+        var habitTasks = tasks.filter(function (t) { return /早起|爬楼梯|睡觉|运动|收集/.test(t.text); });
+        var habitDone = habitTasks.filter(function (t) { return t.done; }).length;
+        s += '习惯类任务 ' + habitDone + '/' + habitTasks.length + ' 完成。';
+        s += habitDone >= habitTasks.length * 0.7 ? '习惯养成良好。\n\n' : '部分习惯未坚持，建议优先完成习惯类任务。\n\n';
+        s += '三、执行效率\n';
+        s += tasks.length > 8 ? '今日任务偏多(' + tasks.length + '项)，建议控制在5-7项以提高完成率。\n\n' : '任务数量适中，聚焦度高。\n\n';
+        s += '四、拖延问题\n';
+        s += pending ? '未完成任务：\n' + pending + '\n\n' : '无拖延任务。\n\n';
+        s += '五、优化建议\n';
+        s += rate >= 80 ? '· 保持当前节奏，可适当增加黑胶采购相关任务\n· 关注高优先级任务' : '· 建议将大任务拆分为小步骤\n· 习惯类任务优先安排在早晨\n· 每日复盘未完成任务原因';
+        return s;
+      }
+    },
+    websites: {
+      label: 'AI整理网站',
+      collect: function () { return VHDB.getAll('websites'); },
+      prompt: function (d) {
+        return {
+          system: '你是黑胶商业工作台的AI助手。分析用户收藏的黑胶网站，输出：网站类型统计、用途分类、推荐分类、是否重复、哪些最适合购买、哪些适合查询。用中文，结构清晰。',
+          user: '网站收藏数据：\n' + JSON.stringify(d.map(function (w) { return { name: w.name, url: w.url, category: w.category, note: w.note }; }), null, 2)
+        };
+      },
+      local: function (rows) {
+        var s = '【网站整理分析】\n\n';
+        s += '一、网站类型统计\n共收藏 ' + rows.length + ' 个网站。\n';
+        var cats = {};
+        rows.forEach(function (r) { var c = r.category || '未分类'; cats[c] = (cats[c] || 0) + 1; });
+        Object.keys(cats).forEach(function (c) { s += '· ' + c + '：' + cats[c] + ' 个\n'; });
+        s += '\n二、用途分类\n';
+        s += '· 购买平台：' + rows.filter(function (r) { return /购买|平台|mercari|ebay|淘宝|闲鱼/i.test(r.category + r.name + r.url); }).map(function (r) { return r.name; }).join('、') + '\n';
+        s += '· 资料查询：' + rows.filter(function (r) { return /查询|资料|discogs/i.test(r.category + r.name + r.url); }).map(function (r) { return r.name; }).join('、') + '\n';
+        s += '· 资讯学习：' + rows.filter(function (r) { return /资讯|学习|news/i.test(r.category + r.name + r.url); }).map(function (r) { return r.name; }).join('、') + '\n';
+        s += '\n三、重复检测\n';
+        var urls = {}, dups = [];
+        rows.forEach(function (r) { var u = (r.url || '').replace(/\/$/, ''); if (urls[u]) dups.push(r.name + ' 与 ' + urls[u]); else urls[u] = r.name; });
+        s += dups.length ? '发现重复：\n' + dups.join('\n') + '\n\n' : '无重复网站。\n\n';
+        s += '四、购买建议\n';
+        s += rows.filter(function (r) { return /购买|平台/i.test(r.category || ''); }).length ? '优先使用购买平台类网站比价，关注日本煤炉/Mercari 的低价黑胶。\n' : '建议添加黑胶购买平台网站（如 Mercari、eBay、闲鱼）。\n';
+        s += '\n五、查询建议\n';
+        s += '购买前务必在 Discogs 查询版本信息和市场参考价，避免购入高仿或高价。';
+        return s;
+      }
+    },
+    discogs: {
+      label: 'AI分析专辑价值',
+      collect: function (extra) { return Promise.resolve(extra || {}); },
+      prompt: function (d) {
+        return {
+          system: '你是黑胶收藏与交易专家。根据专辑信息分析收藏价值、版本稀缺程度、市场潜力，并给出适合收藏还是交易的建议。用中文，结构清晰。',
+          user: '专辑信息：\n' + JSON.stringify(d, null, 2)
+        };
+      },
+      local: function (d) {
+        var s = '【专辑价值分析】\n\n';
+        s += '一、基础信息\n';
+        s += '· 专辑：' + (d.album || d.name || '-') + '\n· 歌手：' + (d.artist || '-') + '\n· 编号：' + (d.catalog || '-') + '\n';
+        s += '· 版本：' + (d.version || '-') + '\n· 年份：' + (d.year || '-') + '\n· 厂牌：' + (d.label || '-') + '\n· 国家：' + (d.country || '-') + '\n\n';
+        s += '二、版本稀缺程度\n';
+        var v = (d.version || '').toLowerCase();
+        var scarce = [];
+        if (/limited|限量|numbered/.test(v)) scarce.push('限量版');
+        if (/first|首版/.test(v)) scarce.push('首版');
+        if (/colou?r|picture|彩胶/.test(v)) scarce.push('彩胶/Picture Disc');
+        s += scarce.length ? '版本特征：' + scarce.join(' · ') + '\n稀缺度：' + (scarce.length >= 2 ? '高' : scarce.length === 1 ? '中' : '低') + '\n\n' : '普通版本，稀缺度低。\n\n';
+        s += '三、社区关注度\n';
+        s += '· want（想买人数）：' + (d.want || '-') + '\n· have（拥有人数）：' + (d.have || '-') + '\n· 在售数量：' + (d.numForSale || '-') + '\n';
+        s += d.want > 100 ? '海外需求旺盛。\n\n' : d.want > 30 ? '海外有一定需求。\n\n' : '海外需求一般或无数据。\n\n';
+        s += '四、市场潜力\n';
+        var ratio = d.want && d.have ? d.want / d.have : 0;
+        s += ratio > 2 ? '需求远大于供给，升值潜力大。\n\n' : ratio > 1 ? '需求略大于供给，有一定潜力。\n\n' : '供需平衡或供大于求，升值空间有限。\n\n';
+        s += '五、收藏建议\n';
+        s += scarce.length >= 2 || ratio > 2 ? '推荐收藏。版本稀缺且市场需求旺盛，适合长期持有。' : scarce.length >= 1 || ratio > 1 ? '可收藏可交易。关注市场价格波动选择时机。' : '适合交易流转。普通版本收藏价值有限，关注利润空间即可。';
+        return s;
+      }
+    },
+    auth: {
+      label: 'AI辅助鉴定',
+      collect: function (extra) { return Promise.resolve(extra || {}); },
+      prompt: function (d) {
+        return {
+          system: '你是黑胶鉴定专家。根据专辑信息、编号、版本、图片描述分析真实性，输出：编号匹配、版本一致性、包装情况、图片异常、可能风险、真实性参考评分（0-100）、风险等级、购买建议。注意：AI鉴定仅作为辅助参考。用中文。',
+          user: '鉴定数据：\n' + JSON.stringify(d, null, 2)
+        };
+      },
+      local: function (d) {
+        var checks = d.checks || [];
+        var score = 0;
+        var weights = { catalogOk: 22, labelOk: 18, priceOk: 16, printOk: 16, sellerOk: 14, imgOk: 14 };
+        checks.forEach(function (k) { score += weights[k] || 0; });
+        var level = score >= 90 ? '低风险（可信）' : score >= 70 ? '中风险（需确认）' : '高风险（谨慎）';
+        var advice = score >= 90 ? '推荐购买' : score >= 70 ? '谨慎购买，建议进一步核实版本细节' : '不建议购买，风险较高';
+        var s = '【AI辅助鉴定】\n\n';
+        s += '一、编号匹配\nCatalog: ' + (d.catalog || '-') + '，Matrix: ' + (d.matrix || '-') + '\n';
+        s += checks.indexOf('catalogOk') >= 0 ? '编号与官方一致 ✓\n\n' : '编号未确认或不一致 ✗\n\n';
+        s += '二、版本一致性\n';
+        s += checks.indexOf('labelOk') >= 0 ? '厂牌/版本/发行信息一致 ✓\n\n' : '版本信息未确认 ✗\n\n';
+        s += '三、包装情况\n';
+        s += checks.indexOf('printOk') >= 0 ? '封面/标签印刷正常 ✓\n\n' : '印刷存在异常或未确认 ✗\n\n';
+        s += '四、图片异常\n';
+        s += d.coverImg || d.sleeveImg || d.labelImg ? '已上传照片可供核对。\n\n' : '未上传照片，建议补充封面/外包装/标签照片。\n\n';
+        s += '五、可能风险\n';
+        if (checks.indexOf('priceOk') < 0) s += '· 价格可能异常偏低，警惕假货\n';
+        if (checks.indexOf('sellerOk') < 0) s += '· 卖家信誉未确认\n';
+        if (!d.coverImg) s += '· 缺少实物照片，无法核实真伪\n';
+        s += '\n六、真实性参考评分\n评分：' + score + '/100\n风险等级：' + level + '\n\n';
+        s += '七、购买建议\n' + advice + '\n\n⚠️ AI鉴定仅作为辅助参考，最终判断请以实物和专业鉴定为准。';
+        return s;
+      }
+    },
+    analysis: {
+      label: '开始AI分析',
+      collect: function (extra) { return Promise.resolve(extra || {}); },
+      prompt: function (d) {
+        return {
+          system: '你是黑胶采购决策专家。综合分析海外热度、中国市场热度、收藏价值、版本价值、市场需求、利润空间，输出0-100综合评分、评分等级、购买建议报告。用中文，结构清晰。',
+          user: '分析数据：\n' + JSON.stringify(d, null, 2)
+        };
+      },
+      local: function (d) {
+        var buy = Number(d.buyPrice) || 0, sell = Number(d.presalePrice) || 0;
+        var profit = sell - buy;
+        var margin = buy > 0 ? profit / buy * 100 : 0;
+        var s = '【黑胶全分析】\n\n';
+        s += '一、基础信息\n· 名称：' + (d.name || '-') + '\n· 歌手：' + (d.artist || '-') + '\n· 编号：' + (d.catalog || '-') + '\n· 版本：' + (d.version || '-') + '\n\n';
+        s += '二、海外热度\n';
+        var want = d.want || 0, have = d.have || 0, nfs = d.numForSale || 0;
+        s += 'want ' + want + ' / have ' + have + ' / 在售 ' + nfs + '\n';
+        var overseas = want > 100 ? 80 : want > 50 ? 65 : want > 20 ? 50 : 40;
+        s += '海外热度：' + (overseas >= 75 ? '高' : overseas >= 60 ? '中' : '低') + '\n\n';
+        s += '三、中国热度\n（参考估算）基于海外热度与版本稀缺度推算\n';
+        var china = Math.round(overseas * 0.82);
+        s += '中国热度：' + (china >= 75 ? '高' : china >= 60 ? '中' : '低') + '\n\n';
+        s += '四、收藏价值\n';
+        var v = (d.version || '').toLowerCase();
+        var cv = 60;
+        if (/limited|限量/.test(v)) cv += 20;
+        if (/first|首版/.test(v)) cv += 20;
+        if (/colou?r|picture|彩胶/.test(v)) cv += 10;
+        cv = Math.min(100, cv);
+        s += '收藏价值评分：' + cv + '/100\n\n';
+        s += '五、利润分析\n';
+        s += '采购成本：' + fmtMoney(buy) + '\n预计售价：' + fmtMoney(sell) + '\n预计利润：' + fmtMoney(profit) + '\n利润率：' + margin.toFixed(1) + '%\n\n';
+        s += '六、综合评分\n';
+        var score = Math.round(overseas * 0.25 + china * 0.2 + cv * 0.25 + clamp(margin, 0, 100) * 0.3);
+        s += '综合评分：' + score + '/100\n';
+        s += score >= 90 ? '等级：强烈推荐\n' : score >= 75 ? '等级：推荐关注\n' : score >= 60 ? '等级：谨慎考虑\n' : '等级：不建议采购\n\n';
+        s += '七、购买建议\n';
+        s += score >= 75 ? '推荐购买。' : score >= 60 ? '谨慎购买。' : '不建议购买。';
+        s += '海外热度' + (overseas >= 75 ? '高' : '中等') + '，中国需求' + (china >= 75 ? '明显' : '一般') + '，利润率' + margin.toFixed(0) + '%。';
+        return s;
+      }
+    },
+    inventory: {
+      label: 'AI分析库存',
+      collect: function () { return VHDB.getAll('inventory'); },
+      prompt: function (d) {
+        return {
+          system: '你是黑胶库存管理专家。分析库存数量、结构、热门歌手、滞销风险，输出：哪些优先销售、哪些适合长期收藏、哪些需要调整价格。用中文。',
+          user: '库存数据：\n' + JSON.stringify(d.map(function (r) { return { album: r.album, artist: r.artist, catalog: r.catalog, stockQty: r.stockQty, status: r.status, buyPrice: r.buyPrice, sellPrice: r.sellPrice }; }), null, 2)
+        };
+      },
+      local: function (rows) {
+        var total = rows.reduce(function (s, r) { return s + (Number(r.stockQty) || 0); }, 0);
+        var onSale = rows.filter(function (r) { return r.status === '在售'; }).length;
+        var sold = rows.filter(function (r) { return r.status === '已出售'; }).length;
+        var s = '【库存分析】\n\n';
+        s += '一、库存概况\n总库存：' + total + ' 张\n在售：' + onSale + ' · 已售：' + sold + ' · 品种数：' + rows.length + '\n\n';
+        s += '二、库存结构\n';
+        var artists = {};
+        rows.forEach(function (r) { var a = r.artist || '未知'; artists[a] = (artists[a] || 0) + (Number(r.stockQty) || 0); });
+        var top = Object.keys(artists).sort(function (a, b) { return artists[b] - artists[a]; }).slice(0, 5);
+        s += '热门歌手（按库存量）：\n' + top.map(function (a) { return '· ' + a + '：' + artists[a] + ' 张'; }).join('\n') + '\n\n';
+        s += '三、滞销风险\n';
+        var stale = rows.filter(function (r) { return r.status === '在售' && (Number(r.stockQty) || 0) > 3; });
+        s += stale.length ? '高库存待售项：\n' + stale.map(function (r) { return '· ' + (r.album || '-') + '（库存' + r.stockQty + '）'; }).join('\n') + '\n\n' : '无明显滞销风险。\n\n';
+        s += '四、建议\n';
+        s += '· 优先销售：高库存且在售时间长的专辑\n· 长期收藏：限量版/首版/彩胶版本\n· 调整价格：在售超过30天未成交的，建议降价5-10%';
+        return s;
+      }
+    },
+    hot: {
+      label: 'AI分析热点趋势',
+      collect: function () {
+        return VHDB.get('hot_topics', todayStr()).then(function (rec) {
+          return rec || { date: todayStr(), videos: [], accounts: [], audios: [] };
+        });
+      },
+      prompt: function (d) {
+        return {
+          system: '你是社交媒体与黑胶市场分析师。分析热点视频、热门账号、热门音频，判断为什么爆火、是否与黑胶市场相关、是否存在商业机会。用中文。',
+          user: '今日热点数据：\n' + JSON.stringify(d, null, 2)
+        };
+      },
+      local: function (d) {
+        var vids = d.videos || [], accs = d.accounts || [], auds = d.audios || [];
+        var s = '【热点趋势分析】\n\n';
+        s += '一、热门视频（' + vids.length + ' 个）\n';
+        s += vids.slice(0, 5).map(function (v) { return '· ' + (v.title || '-') + '（赞' + (v.likes || '-') + '）'; }).join('\n') + '\n';
+        var musicVids = vids.filter(function (v) { return /音乐|黑胶|唱片|歌手|band|jazz|rock|pop/i.test(v.title + v.reason); });
+        s += musicVids.length ? '\n与黑胶相关视频：' + musicVids.length + ' 个\n' : '\n暂无明显黑胶相关视频\n';
+        s += '\n二、热门账号（' + accs.length + ' 个）\n';
+        s += accs.slice(0, 3).map(function (a) { return '· ' + (a.author || '-') + '（' + (a.dir || '') + '）'; }).join('\n') + '\n\n';
+        s += '三、热门音频（' + auds.length + ' 个）\n';
+        s += auds.slice(0, 5).map(function (a) { return '· ' + (a.name || '-') + ' — ' + (a.singer || '-'); }).join('\n') + '\n\n';
+        s += '四、商业机会\n';
+        s += musicVids.length ? '· 发现黑胶相关热点，可关注相关艺人唱片的采购机会\n' : '· 今日热点与黑胶关联度低\n';
+        s += auds.length ? '· 热门音频可能带动相关艺人唱片需求，建议关注\n' : '';
+        s += '\n五、建议\n持续关注音乐类热点，及时采购热点相关黑胶唱片。';
+        return s;
+      }
+    },
+    musicnews: {
+      label: 'AI分析音乐趋势',
+      collect: function () {
+        return VHDB.get('music_news', todayStr()).then(function (rec) {
+          return (rec && rec.items) ? rec.items : [];
+        });
+      },
+      prompt: function (d) {
+        return {
+          system: '你是音乐产业与黑胶投资分析师。分析新专辑/新歌/黑胶发行趋势，输出：哪些艺人值得关注、哪些黑胶可能升值、哪些值得提前布局。用中文。',
+          user: '今日音乐资讯：\n' + JSON.stringify(d, null, 2)
+        };
+      },
+      local: function (items) {
+        var s = '【音乐趋势分析】\n\n';
+        s += '一、今日发行概况\n共 ' + items.length + ' 条新发行。\n';
+        var vinyl = items.filter(function (it) { return /黑胶|vinyl/i.test(it.format || ''); });
+        s += '其中黑胶发行：' + vinyl.length + ' 张\n\n';
+        s += '二、地区分布\n';
+        var regions = {};
+        items.forEach(function (it) { var r = it.region || '其他'; regions[r] = (regions[r] || 0) + 1; });
+        Object.keys(regions).forEach(function (r) { s += '· ' + r + '：' + regions[r] + '\n'; });
+        s += '\n三、值得关注的艺人\n';
+        var artists = {};
+        items.forEach(function (it) { var a = it.artist || '未知'; artists[a] = (artists[a] || 0) + 1; });
+        var topArtists = Object.keys(artists).sort(function (a, b) { return artists[b] - artists[a]; }).slice(0, 5);
+        s += topArtists.map(function (a) { return '· ' + a + '（' + artists[a] + ' 张发行）'; }).join('\n') + '\n\n';
+        s += '四、可能升值的黑胶\n';
+        s += vinyl.length ? vinyl.slice(0, 5).map(function (v) { return '· ' + (v.artist || '-') + ' — ' + (v.album || '-'); }).join('\n') : '今日暂无黑胶发行。';
+        s += '\n\n五、提前布局建议\n关注日本和欧美的黑胶首发，首版/限量版通常升值潜力最大。';
+        return s;
+      }
+    },
+    fx: {
+      label: 'AI分析采购影响',
+      collect: function () {
+        return VHDB.get('exchange_rates', todayStr()).then(function (rec) {
+          return rec || { date: todayStr(), rates: {} };
+        });
+      },
+      prompt: function (d) {
+        return {
+          system: '你是外汇与黑胶采购成本分析师。分析当前汇率变化对日本/香港采购的影响、对利润的影响，输出采购建议。用中文。',
+          user: '今日汇率数据：\n' + JSON.stringify(d, null, 2)
+        };
+      },
+      local: function (d) {
+        var r = d.rates || {};
+        var s = '【汇率采购影响分析】\n\n';
+        s += '一、当前汇率（1外币=?人民币）\n';
+        ['JPY', 'HKD', 'USD', 'EUR', 'GBP', 'KRW', 'TWD'].forEach(function (c) {
+          if (r[c]) s += '· ' + c + '：¥' + r[c].toFixed(4) + '\n';
+        });
+        s += '\n二、日本采购影响\n';
+        s += r.JPY ? '当前日元汇率 ¥' + r.JPY.toFixed(4) + '/日元。\n' : '无日元数据。\n';
+        s += r.JPY && r.JPY < 0.05 ? '日元处于低位，是采购日本黑胶的好时机。\n\n' : '日元汇率中等，按需采购即可。\n\n';
+        s += '三、香港采购影响\n';
+        s += r.HKD ? '当前港币汇率 ¥' + r.HKD.toFixed(4) + '/港币。\n' : '无港币数据。\n';
+        s += '\n四、利润影响\n';
+        s += '汇率波动直接影响采购成本。日元每降1%，日本黑胶采购成本降低约1%，利润率相应提升。\n\n';
+        s += '五、采购建议\n';
+        s += r.JPY && r.JPY < 0.05 ? '· 建议加大日本黑胶采购\n· 关注 Mercari/煤炉 低价黑胶' : '· 按需采购，控制库存\n· 关注汇率走势择机下单';
+        return s;
+      }
+    },
+    expense: {
+      label: 'AI分析消费',
+      collect: function () { return VHDB.getAll('expenses'); },
+      prompt: function (d) {
+        return {
+          system: '你是财务分析师。分析黑胶生意的消费趋势、采购投入、运营成本，输出资金管理建议。用中文。',
+          user: '消费记录：\n' + JSON.stringify(d, null, 2)
+        };
+      },
+      local: function (rows) {
+        var total = rows.reduce(function (s, r) { return s + (Number(r.amount) || 0); }, 0);
+        var month = monthStr();
+        var monthTotal = rows.filter(function (r) { return (r.date || '').slice(0, 7) === month; }).reduce(function (s, r) { return s + (Number(r.amount) || 0); }, 0);
+        var s = '【消费分析】\n\n';
+        s += '一、消费概况\n总消费：' + fmtMoney(total) + '\n本月消费：' + fmtMoney(monthTotal) + '\n记录数：' + rows.length + '\n\n';
+        s += '二、消费趋势\n';
+        var byMonth = {};
+        rows.forEach(function (r) { var m = (r.date || '').slice(0, 7); byMonth[m] = (byMonth[m] || 0) + (Number(r.amount) || 0); });
+        Object.keys(byMonth).sort().slice(-6).forEach(function (m) { s += '· ' + m + '：' + fmtMoney(byMonth[m]) + '\n'; });
+        s += '\n三、采购投入\n';
+        var purchases = rows.filter(function (r) { return /采购|黑胶|唱片|进货/i.test(r.note || ''); });
+        var purchaseTotal = purchases.reduce(function (s2, r) { return s2 + (Number(r.amount) || 0); }, 0);
+        s += '采购相关支出：' + fmtMoney(purchaseTotal) + '（' + purchases.length + ' 笔）\n';
+        s += '占比：' + (total > 0 ? (purchaseTotal / total * 100).toFixed(1) : 0) + '%\n\n';
+        s += '四、资金管理建议\n';
+        s += '· 采购支出占比' + (total > 0 ? (purchaseTotal / total * 100).toFixed(0) : 0) + '%，';
+        s += purchaseTotal / total > 0.7 ? '偏高，注意控制采购节奏\n' : '合理，保持平衡\n';
+        s += '· 建议每月预留20%资金作为周转\n· 关注单品利润率，淘汰低利润品类';
+        return s;
+      }
+    },
+    crm: {
+      label: 'AI分析客户',
+      collect: function () { return VHDB.getAll('crm'); },
+      prompt: function (d) {
+        return {
+          system: '你是客户关系管理专家。分析客户喜好、购买趋势、推荐商品，输出客户维护建议。用中文。',
+          user: 'CRM数据：\n' + JSON.stringify(d.map(function (r) { return { name: r.name, contact: r.contact, purchases: r.purchases, note: r.note }; }), null, 2)
+        };
+      },
+      local: function (rows) {
+        var s = '【客户分析】\n\n';
+        s += '一、客户概况\n客户总数：' + rows.length + '\n';
+        var withPurchases = rows.filter(function (r) { return r.purchases && r.purchases.length; });
+        s += '有购买记录：' + withPurchases.length + '\n\n';
+        s += '二、客户喜好\n';
+        var artists = {};
+        withPurchases.forEach(function (r) {
+          (r.purchases || []).forEach(function (p) { var a = p.artist || '未知'; artists[a] = (artists[a] || 0) + 1; });
+        });
+        var top = Object.keys(artists).sort(function (a, b) { return artists[b] - artists[a]; }).slice(0, 5);
+        s += top.length ? top.map(function (a) { return '· ' + a + '（' + artists[a] + ' 次）'; }).join('\n') : '暂无足够数据';
+        s += '\n\n三、购买趋势\n';
+        var totalPurchases = withPurchases.reduce(function (s2, r) { return s2 + (r.purchases || []).length; }, 0);
+        s += '总购买次数：' + totalPurchases + '\n';
+        s += totalPurchases > 0 ? '平均每位客户购买 ' + (totalPurchases / withPurchases.length).toFixed(1) + ' 次\n\n' : '\n\n';
+        s += '四、客户维护建议\n';
+        s += '· 对有购买记录的客户定期推送新品上架通知\n· 关注高频购买客户，提供优先选购权\n· 对未购买的客户，推荐热门入门级黑胶';
+        return s;
+      }
+    }
+  };
+
+  // 生成 AI 分析区块 HTML（按钮 + 结果面板 + 历史）
+  function aiSectionHTML(mid) {
+    var cfg = AI_CONFIGS[mid];
+    if (!cfg) return '';
+    return '<div class="ai-section">' +
+      '<button class="btn btn-ai" data-ai="' + mid + '">🤖 ' + esc(cfg.label) + '</button>' +
+      '<div class="ai-result hidden" data-ai-result="' + mid + '"></div>' +
+      '<div class="ai-history" data-ai-history="' + mid + '"></div>' +
+      '</div>';
+  }
+
+  // 绑定 AI 按钮（在模块 node 创建后调用）
+  function bindAI(node, mid, getExtra) {
+    var cfg = AI_CONFIGS[mid];
+    if (!cfg) return;
+    var btn = node.querySelector('[data-ai="' + mid + '"]');
+    var resultEl = node.querySelector('[data-ai-result="' + mid + '"]');
+    var histEl = node.querySelector('[data-ai-history="' + mid + '"]');
+    if (!btn) return;
+    btn.onclick = function () { runAI(mid, resultEl, histEl, getExtra); };
+    loadAIHistory(histEl, mid);
+  }
+
+  // 执行 AI 分析
+  function runAI(mid, resultEl, histEl, getExtra) {
+    var cfg = AI_CONFIGS[mid];
+    resultEl.classList.remove('hidden');
+    resultEl.innerHTML = '<div class="ai-loading">🤖 AI 分析中…</div>';
+    var extraP = getExtra ? Promise.resolve(getExtra()) : Promise.resolve({});
+    extraP.then(function (extra) {
+      return cfg.collect(extra);
+    }).then(function (data) {
+      return VHDB.getConfig().then(function (settings) {
+        var aiProxy = settings.aiProxyUrl || '';
+        if (aiProxy) {
+          var p = cfg.prompt(data);
+          return VHAPI.fetchAIAnalysis(aiProxy, {
+            module: mid,
+            systemPrompt: p.system,
+            userPrompt: p.user,
+            data: data
+          }).then(function (resp) {
+            return {
+              module: mid, label: cfg.label,
+              result: resp.result || resp.content || resp.choices && resp.choices[0] && resp.choices[0].message && resp.choices[0].message.content || 'AI 返回为空',
+              source: 'AI 分析（' + (resp.model || 'DeepSeek') + '）',
+              dataKeys: Object.keys(data).length + ' 项数据',
+              createdAt: new Date().toISOString()
+            };
+          });
+        } else {
+          return {
+            module: mid, label: cfg.label,
+            result: cfg.local(data),
+            source: '本地分析（未配置 AI 代理，不消耗 Token）',
+            dataKeys: Object.keys(data).length + ' 项数据',
+            createdAt: new Date().toISOString()
+          };
+        }
+      });
+    }).then(function (rec) {
+      renderAIResult(resultEl, rec, mid);
+      VHDB.add('ai_analyses', rec).then(function () { loadAIHistory(histEl, mid); });
+    }).catch(function (err) {
+      resultEl.innerHTML = '<div class="ai-error">❌ 分析失败：' + esc(err.message) + '</div>' +
+        '<div class="ai-tip">提示：未配置 AI 代理将使用本地分析。如需真实 AI，请在系统设置填写「AI分析代理地址」。</div>';
+    });
+  }
+
+  // 渲染 AI 分析结果
+  function renderAIResult(el, rec, mid) {
+    var time = new Date(rec.createdAt).toLocaleString('zh-CN');
+    el.innerHTML =
+      '<div class="ai-card">' +
+      '<div class="ai-card-head"><b>🤖 ' + esc(rec.label) + '</b>' +
+      '<span class="ai-time">' + esc(time) + '</span></div>' +
+      '<div class="ai-source">数据来源：' + esc(rec.source) + ' · ' + esc(rec.dataKeys || '') + '</div>' +
+      '<div class="ai-content">' + esc(rec.result).replace(/\n/g, '<br>') + '</div>' +
+      '<div class="ai-actions">' +
+      '<button class="btn btn-sm" data-ai-copy="' + mid + '">📋 复制</button>' +
+      '<button class="btn btn-sm" data-ai-redo="' + mid + '">🔄 重新分析</button>' +
+      '<span class="ai-saved">✓ 已保存到历史</span>' +
+      '</div></div>';
+    el.querySelector('[data-ai-copy="' + mid + '"]').onclick = function () {
+      navigator.clipboard.writeText(rec.result).then(function () { toast('已复制到剪贴板', 'ok'); }).catch(function () { toast('复制失败', 'err'); });
+    };
+    el.querySelector('[data-ai-redo="' + mid + '"]').onclick = function () {
+      runAI(mid, el, el.parentElement.querySelector('[data-ai-history="' + mid + '"]'));
+    };
+  }
+
+  // 加载历史记录
+  function loadAIHistory(el, mid) {
+    if (!el) return;
+    VHDB.getAll('ai_analyses').then(function (rows) {
+      rows = rows.filter(function (r) { return r.module === mid; }).sort(function (a, b) {
+        return (b.createdAt || '').localeCompare(a.createdAt || '');
+      }).slice(0, 5);
+      if (!rows.length) { el.innerHTML = ''; return; }
+      el.innerHTML = '<div class="section-title">AI 分析历史（最近 ' + rows.length + ' 条）</div>' +
+        rows.map(function (r, i) {
+          var time = new Date(r.createdAt).toLocaleString('zh-CN');
+          return '<div class="ai-hist-item">' +
+            '<span class="ai-hist-time">' + esc(time) + '</span> ' + esc(r.source) +
+            ' <button class="btn btn-sm" data-ai-view="' + mid + '" data-idx="' + i + '">查看</button>' +
+            '</div>';
+        }).join('');
+      $$('[data-ai-view="' + mid + '"]', el).forEach(function (btn) {
+        btn.onclick = function () {
+          var idx = Number(btn.dataset.idx);
+          var resultEl = el.parentElement.querySelector('[data-ai-result="' + mid + '"]');
+          renderAIResult(resultEl, rows[idx], mid);
+        };
+      });
+    });
+  }
 
   /* ---------------- 自定义模块 ---------------- */
 
@@ -510,7 +999,7 @@
       '<div class="mod-actions"><button class="btn btn-primary" id="addBtn">＋ 新建鉴定</button></div></div>' +
       '<div class="hint">本助手「不自动识别图片、不自动扫描图片」。请人工核对后勾选检查项并上传照片，系统生成<b>真实性参考评分（100分制）</b>与风险等级。</div>' +
       '<div class="form-wrap hidden" id="formWrap"></div>' +
-      '<div class="list-wrap" id="listWrap"><div class="empty">加载中…</div></div></div>');
+      '<div class="list-wrap" id="listWrap"><div class="empty">加载中…</div></div>' + aiSectionHTML('auth') + '</div>');
     var listWrap = node.querySelector('#listWrap');
     var formWrap = node.querySelector('#formWrap');
     var editingId = null;
@@ -598,6 +1087,7 @@
     }
     node.querySelector('#addBtn').onclick = function () { editingId = null; buildForm({}); };
     node._refresh = refresh;
+    bindAI(node, 'auth');
     return { node: node, refresh: refresh };
   }
 
@@ -611,7 +1101,7 @@
       '<div class="bar"><span id="planBar" style="width:0%"></span></div>' +
       '<div style="margin:14px 0"><input type="text" id="newTask" placeholder="新增任务内容" style="padding:9px 10px;border-radius:8px;border:1px solid var(--line);background:var(--bg-2);color:var(--text);width:260px"> ' +
       '<button class="btn btn-primary" id="addTask">＋ 添加</button></div>' +
-      '<div class="list" id="planList"></div></div>');
+      '<div class="list" id="planList"></div>' + aiSectionHTML('plan') + '</div>');
     var dateInput = node.querySelector('#planDate');
     var histSel = node.querySelector('#histSel');
     var listEl = node.querySelector('#planList');
@@ -660,6 +1150,7 @@
       }).then(function () { node.querySelector('#newTask').value = ''; refresh(); });
     };
     node._refresh = refresh;
+    bindAI(node, 'plan');
     return { node: node, refresh: refresh };
   }
 
@@ -682,7 +1173,7 @@
       '<div class="form-btns"><button class="btn btn-primary">添加</button></div></form></details>' +
       '<div class="section-title">热门视频</div><div id="vList" class="list"></div>' +
       '<div class="section-title">每日筛选 · 3 个热门账号</div><div id="aList" class="list"></div>' +
-      '<div class="section-title">热门音频</div><div id="auList" class="list"></div></div>');
+      '<div class="section-title">热门音频</div><div id="auList" class="list"></div>' + aiSectionHTML('hot') + '</div>');
 
     function refresh() {
       VHDB.get('hot_topics', todayStr()).then(function (rec) {
@@ -723,6 +1214,7 @@
       }).then(function () { f.reset(); toast('已添加', 'ok'); refresh(); });
     };
     node._refresh = refresh;
+    bindAI(node, 'hot');
     return { node: node, refresh: refresh };
   }
 
@@ -740,7 +1232,7 @@
       '<label>出版国家<input name="country"></label><label>购买链接<input name="buyLink"></label>' +
       '<label class="full">来源链接<input name="srcLink"></label></div>' +
       '<div class="form-btns"><button class="btn btn-primary">添加</button></div></form></details>' +
-      '<div id="nList" class="list"></div></div>');
+      '<div id="nList" class="list"></div>' + aiSectionHTML('musicnews') + '</div>');
 
     function refresh() {
       VHDB.get('music_news', todayStr()).then(function (rec) {
@@ -772,6 +1264,7 @@
       }).then(function () { f.reset(); toast('已添加', 'ok'); refresh(); });
     };
     node._refresh = refresh;
+    bindAI(node, 'musicnews');
     return { node: node, refresh: refresh };
   }
 
@@ -788,7 +1281,7 @@
       '<button class="btn btn-primary" id="convBtn">换算 → CNY</button></div>' +
       '<div id="convRes" class="score-big"></div></div>' +
       '<div id="fxToday" class="dash-grid" style="margin-top:14px"></div>' +
-      '<div class="section-title">历史汇率</div><div id="fxHist" class="list"></div></div>');
+      '<div class="section-title">历史汇率</div><div id="fxHist" class="list"></div>' + aiSectionHTML('fx') + '</div>');
 
     function refresh() {
       Promise.all([VHDB.get('exchange_rates', todayStr()), VHDB.getAll('exchange_rates')]).then(function (r) {
@@ -819,6 +1312,7 @@
       });
     };
     node._refresh = refresh;
+    bindAI(node, 'fx');
     return { node: node, refresh: refresh };
   }
 
@@ -909,7 +1403,7 @@
       '<input type="search" id="wSearch" placeholder="搜索名称或分类" style="padding:9px 10px;border-radius:8px;border:1px solid var(--line);background:var(--bg-2);color:var(--text);width:240px">' +
       '<select id="wFilter"><option value="">全部分类</option>' + CATS.map(function (c) { return '<option>' + c + '</option>'; }).join('') + '</select></div>' +
       '<div class="form-wrap hidden" id="formWrap"></div>' +
-      '<div class="list-wrap" id="listWrap"><div class="empty">加载中…</div></div></div>');
+      '<div class="list-wrap" id="listWrap"><div class="empty">加载中…</div></div>' + aiSectionHTML('websites') + '</div>');
     var listWrap = node.querySelector('#listWrap');
     var formWrap = node.querySelector('#formWrap');
     var search = node.querySelector('#wSearch');
@@ -973,6 +1467,7 @@
     search.oninput = refresh;
     filter.onchange = refresh;
     node._refresh = refresh;
+    bindAI(node, 'websites');
     return { node: node, refresh: refresh };
   }
 
@@ -985,6 +1480,7 @@
       '<label class="full" style="display:flex;flex-direction:column;gap:5px;margin-bottom:10px">Discogs Token（用于黑胶资料查询）<input name="discogsToken" placeholder="在 discogs.com/settings/developers 申请"></label>' +
       '<label class="full" style="display:flex;flex-direction:column;gap:5px;margin-bottom:10px">Discogs 代理地址（可选，解决浏览器跨域；Cloudflare Worker 等，留空走直连）<input name="discogsProxy" placeholder="https://你的worker.dev"></label>' +
       '<label class="full" style="display:flex;flex-direction:column;gap:5px;margin-bottom:10px">中国热搜代理地址（可选，用于黑胶全分析的中国热度。部署 Cloudflare Worker 转发微博/抖音热搜，留空则中国热度使用本地估算）<input name="chinaHotProxy" placeholder="https://你的热搜worker.dev"></label>' +
+      '<label class="full" style="display:flex;flex-direction:column;gap:5px;margin-bottom:10px">AI分析代理地址（可选，用于全局AI分析。部署 Cloudflare Worker 代理调 DeepSeek 等，Key 存 Worker 端不泄露。留空则所有AI分析走本地确定性算法，不消耗Token）<input name="aiProxyUrl" placeholder="https://你的worker.dev/ai-analyze"></label>' +
       '<label class="full" style="display:flex;flex-direction:column;gap:5px;margin-bottom:10px">音乐资讯源（返回 JSON 数组或 {items:[...]} 的 URL）<input name="musicNewsSource"></label>' +
       '<label class="full" style="display:flex;flex-direction:column;gap:5px;margin-bottom:10px">抖音热点源（返回 {videos:[...],accounts:[...]} 的 URL）<input name="hotTopicSource"></label>' +
       '<label class="full" style="display:flex;flex-direction:column;gap:5px;margin-bottom:10px">热门音频源（返回数组或 {audios:[...]} 的 URL）<input name="audioSource"></label>' +
@@ -993,7 +1489,7 @@
       '<div class="hint">未配置数据源时，各采集按钮会提示手动添加；手动录入始终是可靠主路径。汇率接口为免费公共服务，无需配置即可使用。</div></div>');
     VHDB.getConfig().then(function (cfg) {
       var f = node.querySelector('#cfgForm');
-      ['displayName', 'theme', 'discogsToken', 'discogsProxy', 'chinaHotProxy', 'musicNewsSource', 'hotTopicSource', 'audioSource'].forEach(function (k) {
+      ['displayName', 'theme', 'discogsToken', 'discogsProxy', 'chinaHotProxy', 'aiProxyUrl', 'musicNewsSource', 'hotTopicSource', 'audioSource'].forEach(function (k) {
         if (cfg[k] != null) f[k].value = cfg[k];
       });
       applyTheme(cfg.theme || 'light');
@@ -1003,6 +1499,7 @@
         displayName: f.displayName.value, theme: f.theme.value, discogsToken: f.discogsToken.value,
         discogsProxy: f.discogsProxy.value,
         chinaHotProxy: f.chinaHotProxy.value,
+        aiProxyUrl: f.aiProxyUrl.value,
         musicNewsSource: f.musicNewsSource.value, hotTopicSource: f.hotTopicSource.value,
         audioSource: f.audioSource.value
       };
@@ -1038,7 +1535,7 @@
       '<div class="section-title">分析结果</div>' +
       '<div id="result"><div class="empty">填写信息后点击「开始分析」。</div></div>' +
       '<div class="section-title">历史分析记录</div>' +
-      '<div id="histList"><div class="empty">暂无记录。</div></div></div>');
+      '<div id="histList"><div class="empty">暂无记录。</div></div>' + aiSectionHTML('analysis') + '</div>');
 
     var pendingList = node.querySelector('#pendingList');
     var formWrap = node.querySelector('#formWrap');
@@ -1182,6 +1679,17 @@
       discogsInfo.classList.add('hidden'); discogsInfo.innerHTML = '';
     };
     node._refresh = refresh; refresh();
+    bindAI(node, 'analysis', function () {
+      var form = node.querySelector('#aForm');
+      if (!form) return {};
+      return Object.assign({}, draftDiscogs || {}, {
+        name: form.elements['name'].value.trim(),
+        artist: form.elements['artist'].value.trim(),
+        catalog: form.elements['catalog'].value.trim(),
+        buyPrice: form.elements['buyPrice'].value === '' ? '' : Number(form.elements['buyPrice'].value),
+        presalePrice: form.elements['presalePrice'].value === '' ? '' : Number(form.elements['presalePrice'].value)
+      });
+    });
     return { node: node, refresh: refresh };
   }
 
@@ -1198,7 +1706,7 @@
       '<div class="section-title">查询结果</div>' +
       '<div id="dResults"><div class="empty">输入查询条件后点击「查询专辑信息」。</div></div>' +
       '<div class="section-title">专辑详情</div>' +
-      '<div id="dDetail"><div class="empty">点击某条结果「查看详情」查看完整资料。</div></div></div>');
+      '<div id="dDetail"><div class="empty">点击某条结果「查看详情」查看完整资料。</div></div>' + aiSectionHTML('discogs') + '</div>');
 
     var resultsEl = node.querySelector('#dResults');
     var detailEl = node.querySelector('#dDetail');
@@ -1330,6 +1838,7 @@
     }
 
     node._refresh = function () {};
+    bindAI(node, 'discogs', function () { return selected || {}; });
     return { node: node, refresh: function () {} };
   }
 
@@ -1343,7 +1852,7 @@
       '<input type="search" id="iSearch" placeholder="搜索名称 / 歌手 / Catalog" style="padding:9px 10px;border-radius:8px;border:1px solid var(--line);background:var(--bg-2);color:var(--text);width:260px">' +
       '<select id="iFilter"><option value="">全部状态</option>' + STATUS.map(function (s) { return '<option>' + s + '</option>'; }).join('') + '</select></div>' +
       '<div class="form-wrap hidden" id="formWrap"></div>' +
-      '<div class="list-wrap" id="listWrap"><div class="empty">加载中…</div></div></div>');
+      '<div class="list-wrap" id="listWrap"><div class="empty">加载中…</div></div>' + aiSectionHTML('inventory') + '</div>');
     var listWrap = node.querySelector('#listWrap');
     var formWrap = node.querySelector('#formWrap');
     var search = node.querySelector('#iSearch');
@@ -1458,6 +1967,7 @@
     search.oninput = refresh;
     filter.onchange = refresh;
     node._refresh = refresh;
+    bindAI(node, 'inventory');
     return { node: node, refresh: refresh };
   }
 
@@ -1468,7 +1978,7 @@
       '<button class="btn btn-collect" id="addBuy">＋ 添加购买记录</button></div></div>' +
       '<div class="hint">客户购买黑胶后，添加购买记录将<b>自动扣减库存数量</b>。专辑从「黑胶库存管理」中选择。</div>' +
       '<div class="form-wrap hidden" id="formWrap"></div>' +
-      '<div class="list-wrap" id="listWrap"><div class="empty">加载中…</div></div></div>');
+      '<div class="list-wrap" id="listWrap"><div class="empty">加载中…</div></div>' + aiSectionHTML('crm') + '</div>');
     var listWrap = node.querySelector('#listWrap');
     var formWrap = node.querySelector('#formWrap');
     var editingId = null;
@@ -1563,6 +2073,7 @@
     node.querySelector('#addBtn').onclick = function () { editingId = null; buildCustForm({}); };
     node.querySelector('#addBuy').onclick = buildBuyForm;
     node._refresh = refresh;
+    bindAI(node, 'crm');
     return { node: node, refresh: refresh };
   }
 
