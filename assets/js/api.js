@@ -122,10 +122,50 @@
     });
   }
 
+  // 全球音乐资讯默认源：MusicBrainz 发行数据库。
+  // 免费、免 Key、支持 CORS（Access-Control-Allow-Origin: *），浏览器可直接请求。
+  // 返回与音乐资讯模块兼容的 items 数组：artist/album/region/format/releaseDate/
+  // company/country/buyLink/srcLink/cover。
+  function fetchMusicBrainzNews(limit) {
+    limit = limit || 25;
+    var d = new Date();
+    var ds = d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+    var url = 'https://musicbrainz.org/ws/2/release/?query=date:' + ds + '&fmt=json&limit=' + limit;
+    return fetch(url, { headers: { 'Accept': 'application/json' } }).then(function (r) {
+      if (!r.ok) throw new Error('MusicBrainz ' + r.status);
+      return r.json();
+    }).then(function (data) {
+      var regionMap = { US: '美国', JP: '日本', KR: '韩国', TW: '中国港台', HK: '中国港台', CN: '中国港台' };
+      var eu = ['GB', 'DE', 'FR', 'ES', 'IT', 'NL', 'SE', 'NO', 'FI', 'DK', 'IE', 'CH', 'AT', 'BE', 'PT'];
+      return (data.releases || []).map(function (it) {
+        var ac = it['artist-credit'] || [];
+        var artist = (ac[0] && (ac[0].name || (ac[0].artist && ac[0].artist.name))) || '未知艺人';
+        var country = it.country || '';
+        var region = regionMap[country] || (eu.indexOf(country) >= 0 ? '欧洲' : '其他');
+        var fmt = (it.media && it.media[0] && it.media[0].format) || '';
+        var format = /vinyl/i.test(fmt) ? '黑胶' : (fmt || 'CD');
+        return {
+          artist: artist,
+          album: it.title || '',
+          region: region,
+          format: format,
+          releaseDate: it.date || '',
+          company: '',
+          country: country,
+          buyLink: '',
+          srcLink: 'https://musicbrainz.org/release/' + it.id,
+          cover: 'https://coverartarchive.org/release/' + it.id + '/front',
+          source: 'MusicBrainz'
+        };
+      });
+    });
+  }
+
   global.VHAPI = {
     fetchExchangeRates: fetchExchangeRates,
     fetchDiscogs: fetchDiscogs,
     fetchDiscogsRelease: fetchDiscogsRelease,
-    fetchJson: fetchJson
+    fetchJson: fetchJson,
+    fetchMusicBrainzNews: fetchMusicBrainzNews
   };
 })(window);

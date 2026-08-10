@@ -80,11 +80,15 @@
   }
   function collectMusicNews() {
     return VHDB.getConfig().then(function (cfg) {
-      if (!cfg.musicNewsSource) { toast('未配置资讯源，请在系统设置配置或使用手动添加', 'err'); return; }
-      return VHAPI.fetchJson(cfg.musicNewsSource).then(function (data) {
-        var items = Array.isArray(data) ? data : (data.items || []);
+      // 未配置自定义资讯源时，默认使用 MusicBrainz 全球发行库（免费、免 Key、支持 CORS）。
+      var p = cfg.musicNewsSource
+        ? VHAPI.fetchJson(cfg.musicNewsSource).then(function (data) {
+            return Array.isArray(data) ? data : (data.items || []);
+          })
+        : VHAPI.fetchMusicBrainzNews();
+      return p.then(function (items) {
         return VHDB.put('music_news', { date: todayStr(), items: items }).then(function () {
-          toast('已采集 ' + items.length + ' 条音乐资讯', 'ok');
+          toast('已采集 ' + items.length + ' 条音乐资讯（MusicBrainz）', 'ok');
         });
       });
     });
@@ -670,7 +674,7 @@
   function buildMusicNews() {
     var node = elFrom('<div class="module"><div class="mod-head"><h2>音乐新信息</h2>' +
       '<div class="mod-actions"><button class="btn btn-collect" id="cNews">🎵 采集全球音乐资讯</button></div></div>' +
-      '<div class="hint">覆盖日本 / 韩国 / 美国 / 欧洲 / 中国港台 的歌手发行信息。</div>' +
+      '<div class="hint">默认使用 <b>MusicBrainz</b> 全球发行库（免费 · 免 Key · 支持 CORS，覆盖多地区）；点「采集」即取今日新发行。你也可在「系统设置」填入自定义资讯源 JSON 覆盖。</div>' +
       '<details class="form-wrap"><summary style="cursor:pointer;font-weight:600">＋ 手动添加资讯</summary>' +
       '<form id="nForm" style="margin-top:10px"><div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">' +
       '<label>地区<select name="region"><option>日本</option><option>韩国</option><option>美国</option><option>欧洲</option><option>中国港台</option></select></label>' +
@@ -686,11 +690,15 @@
       VHDB.get('music_news', todayStr()).then(function (rec) {
         var items = rec && rec.items ? rec.items : [];
         node.querySelector('#nList').innerHTML = items.length ? items.map(function (it) {
-          return '<div class="item"><div class="body"><b>' + esc(it.artist) + '</b> — ' + esc(it.album) +
+          var thumb = it.cover
+            ? '<img src="' + esc(it.cover) + '" class="news-thumb" alt="" onerror="this.style.display=\'none\'">'
+            : '';
+          return '<div class="item"><div class="body" style="display:flex;gap:10px;align-items:flex-start">' + thumb +
+            '<div style="flex:1"><b>' + esc(it.artist) + '</b> — ' + esc(it.album) +
             ' <span class="tag">' + esc(it.region) + '</span> <span class="tag">' + esc(it.format) + '</span>' +
             '<div class="meta">发布：' + esc(it.releaseDate) + ' · 售价：' + esc(it.price) + ' · ' + esc(it.company) + ' / ' + esc(it.country) + '</div>' +
             '<div class="meta">' + (it.buyLink ? '<a href="' + esc(it.buyLink) + '" target="_blank" rel="noopener">购买</a> ' : '') + (it.srcLink ? '<a href="' + esc(it.srcLink) + '" target="_blank" rel="noopener">来源</a>' : '') + '</div>' +
-            '</div></div>';
+            '</div></div></div>';
         }).join('') : '<div class="empty">暂无，点击「采集」或手动添加</div>';
       });
     }
