@@ -1,7 +1,10 @@
 /* Vinyl Hunter OS — Service Worker
  * 缓存应用外壳，支持离线 / PWA 安装。仅缓存静态资源，不缓存任何远程数据。
+ *
+ * 更新策略：network-first（网络优先，离线时回退缓存）。
+ * 这样每次部署/本地改动后，刷新一次即可拿到最新文件，不会卡在旧缓存。
  */
-var CACHE = 'vinyl-hunter-os-v1';
+var CACHE = 'vinyl-hunter-os-v2';
 var SHELL = [
   './',
   './index.html',
@@ -28,18 +31,19 @@ self.addEventListener('activate', function (e) {
 self.addEventListener('fetch', function (e) {
   var req = e.request;
   if (req.method !== 'GET') return;
-  // 应用外壳走缓存优先；远程 API 走网络优先（且不会被本 SW 预缓存）
+  var url = new URL(req.url);
+  // 远程 API（汇率 / Discogs / MusicBrainz 等）一律走网络，绝不缓存
+  if (url.origin !== self.location.origin) return;
+  // 同源静态资源：网络优先，成功则顺手刷新缓存；失败才回退旧缓存（离线可用）
   e.respondWith(
-    caches.match(req).then(function (cached) {
-      if (cached) return cached;
-      return fetch(req).then(function (res) {
-        // 仅缓存同源静态资源
-        if (res && res.ok && new URL(req.url).origin === self.location.origin) {
-          var clone = res.clone();
-          caches.open(CACHE).then(function (c) { c.put(req, clone); });
-        }
-        return res;
-      }).catch(function () { return cached; });
+    fetch(req).then(function (res) {
+      if (res && res.ok) {
+        var clone = res.clone();
+        caches.open(CACHE).then(function (c) { c.put(req, clone); });
+      }
+      return res;
+    }).catch(function () {
+      return caches.match(req);
     })
   );
 });
