@@ -53,7 +53,7 @@
   var NAV = [
     { id: 'dashboard', label: '首页驾驶舱', icon: '🏠' },
     { id: 'datahub', label: '数据采集中心', icon: '🛰️' },
-    { id: 'pricemonitor', label: '全球黑胶价格监控', icon: '📡' },
+    { id: 'websites', label: '🔗唱片网址', icon: '🔗' },
     { id: 'discogs', label: 'Discogs黑胶数据库', icon: '💿' },
     { id: 'auth', label: '黑胶真假鉴定助手', icon: '🔍' },
     { id: 'selection', label: '黑胶选品评分', icon: '⭐' },
@@ -85,25 +85,17 @@
       if (!cfg.discogsToken) { toast('请先在「系统设置」填写 Discogs Token', 'err'); return; }
       return VHAPI.fetchDiscogs(q, cfg.discogsToken).then(function (list) {
         if (!list.length) { toast('未找到相关结果'); return; }
+        list = list.map(function (it) {
+          var v = (it.version || '').toLowerCase();
+          it.press = /first|1st|首版/.test(v) ? '首版' : (/reissue|repress|再版/.test(v) ? '再版' : '');
+          it.colored = /colou?r|彩胶/.test(v) ? '是' : '否';
+          it.picture = /picture/.test(v) ? '是' : '否';
+          it.limited = /limited|限量/.test(v) ? '限量' : '';
+          return it;
+        });
         return Promise.all(list.map(function (it) { return VHDB.add('discogs_db', it); }))
           .then(function () { toast('已采集 ' + list.length + ' 条 Discogs 资料', 'ok'); });
       });
-    });
-  }
-  function collectPriceMonitor() {
-    return VHDB.getConfig().then(function (cfg) {
-      var srcs = (cfg.priceMonitorSources || '').split(',').map(function (s) { return s.trim(); }).filter(Boolean);
-      if (!srcs.length) { toast('未配置价格监控源，请在系统设置配置或使用手动添加', 'err'); return; }
-      var total = 0;
-      return srcs.reduce(function (p, s) {
-        return p.then(function () {
-          return VHAPI.fetchJson(s).then(function (data) {
-            var items = Array.isArray(data) ? data : (data.items || []);
-            return Promise.all(items.map(function (it) { return VHDB.add('price_monitor', it); }))
-              .then(function () { total += items.length; });
-          });
-        });
-      }, Promise.resolve()).then(function () { toast('已采集 ' + total + ' 条价格信息', 'ok'); });
     });
   }
   function collectMusicNews() {
@@ -303,17 +295,6 @@
 
   /* ---------------- 记录模块配置（精简后保留） ---------------- */
   var RECORD_CONFIGS = {
-    pricemonitor: {
-      title: '全球黑胶价格监控', store: 'price_monitor',
-      collect: { label: '扫描全球黑胶市场', fn: collectPriceMonitor },
-      fields: [
-        { k: 'name', l: '商品名称', t: 'text' },
-        { k: 'price', l: '价格', t: 'number' },
-        { k: 'version', l: '版本', t: 'text' },
-        { k: 'platform', l: '平台', t: 'text', tag: true }
-      ],
-      cols: ['name', 'price', 'version', 'platform']
-    },
     discogs: {
       title: 'Discogs 黑胶数据库', store: 'discogs_db',
       collect: { label: '查询黑胶资料', fn: collectDiscogs },
@@ -324,11 +305,15 @@
         { k: 'label', l: '发行公司', t: 'text' },
         { k: 'year', l: '年份', t: 'number' },
         { k: 'country', l: '国家', t: 'text' },
-        { k: 'version', l: '版本', t: 'text' },
+        { k: 'version', l: '版本信息', t: 'text' },
+        { k: 'press', l: '首版/再版', t: 'select', opts: ['', '首版', '再版', '未知'] },
+        { k: 'colored', l: '彩胶', t: 'select', opts: ['', '是', '否'] },
+        { k: 'picture', l: 'Picture Vinyl', t: 'select', opts: ['', '是', '否'] },
+        { k: 'limited', l: '限量信息', t: 'text' },
         { k: 'weight', l: '重量', t: 'text' },
         { k: 'marketPrice', l: '市场参考价格', t: 'number' }
       ],
-      cols: ['catalog', 'label', 'year', 'country', 'version', 'weight', 'marketPrice']
+      cols: ['catalog', 'label', 'year', 'country', 'version', 'press', 'colored', 'picture', 'limited', 'weight', 'marketPrice']
     },
     selection: {
       title: '黑胶选品评分', store: 'selection_scores', derive: deriveSelection,
@@ -403,63 +388,81 @@
   function buildDashboard() {
     var waveBars = [10, 18, 26, 14, 22, 30, 16, 24, 12, 28, 20, 14, 26, 18, 22, 12]
       .map(function (h) { return '<i style="height:' + h + 'px"></i>'; }).join('');
+    var QUICK = [
+      { id: 'websites', icon: '🔗', label: '唱片网址' },
+      { id: 'discogs', icon: '💿', label: 'Discogs 资料' },
+      { id: 'auth', icon: '🔍', label: '真假鉴定' },
+      { id: 'selection', icon: '⭐', label: '选品评分' },
+      { id: 'arbitrage', icon: '💱', label: '套利分析' },
+      { id: 'profit', icon: '🧮', label: '利润计算' },
+      { id: 'inventory', icon: '📦', label: '库存管理' },
+      { id: 'plan', icon: '✅', label: '每日计划' }
+    ];
     var node = elFrom('<div class="module">' +
       '<div class="vh-hero"><div class="vinyl vinyl-lg"></div>' +
       '<div><h2>首页驾驶舱</h2><div class="sub-title">长期主义 · 黑胶信息差商业工作台</div></div>' +
       '<div class="wave">' + waveBars + '</div></div>' +
       '<div class="dash-grid" id="dashGrid"></div>' +
       '<div class="dash-row">' +
-      '  <div class="card"><h3>库存状态</h3><div id="dashInv"></div></div>' +
       '  <div class="card"><h3>最近鉴定记录</h3><div id="dashAuth"></div></div>' +
-      '</div></div>');
+      '  <div class="card"><h3>最近评分记录</h3><div id="dashSel"></div></div>' +
+      '  <div class="card"><h3>最新音乐资讯</h3><div id="dashMusic"></div></div>' +
+      '</div>' +
+      '<div class="section-title">快捷入口</div>' +
+      '<div class="quick-grid" id="quickGrid"></div></div>');
+
+    $('#quickGrid', node).innerHTML = QUICK.map(function (q) {
+      return '<button class="quick-btn" data-go="' + q.id + '"><span class="qi">' + q.icon + '</span>' + esc(q.label) + '</button>';
+    }).join('');
+    $$('[data-go]', node).forEach(function (b) { b.onclick = function () { showView(b.dataset.go); }; });
 
     node._refresh = function () {
       Promise.all([
         VHDB.get('daily_plans', todayStr()),
         VHDB.getAll('inventory'),
-        VHDB.getAll('selection_scores'),
-        VHDB.get('hot_topics', todayStr()),
-        VHDB.get('music_news', todayStr()),
         VHDB.getAll('expenses'),
-        VHDB.getAll('profit_calcs'),
-        VHDB.getAll('auth_records')
+        VHDB.getAll('auth_records'),
+        VHDB.getAll('selection_scores'),
+        VHDB.get('music_news', todayStr())
       ]).then(function (r) {
-        var plans = r[0], inv = r[1], sel = r[2], hot = r[3], music = r[4], exps = r[5], profit = r[6], auth = r[7];
+        var plans = r[0], inv = r[1], exps = r[2], auth = r[3], sel = r[4], music = r[5];
         var planTotal = plans && plans.tasks ? plans.tasks.length : 0;
         var planDone = plans && plans.tasks ? plans.tasks.filter(function (t) { return t.done; }).length : 0;
         var rate = planTotal ? Math.round(planDone / planTotal * 100) : 0;
         var todayExp = exps.filter(function (e) { return e.date === todayStr(); }).reduce(function (s, e) { return s + (Number(e.amount) || 0); }, 0);
         var monthExp = exps.filter(function (e) { return monthStr(e.date) === monthStr(); }).reduce(function (s, e) { return s + (Number(e.amount) || 0); }, 0);
-        var hotCount = hot ? (hot.videos || []).length : 0;
-        var musicCount = music ? (music.items || music.videos || []).length : 0;
 
         var cards = [
           { k: '今日任务完成率', v: rate + '<small>%</small>', cls: 'accent' },
           { k: '库存数量', v: inv.length },
-          { k: '黑胶评分数量', v: sel.length, cls: 'accent' },
-          { k: '今日热点数量', v: hotCount },
-          { k: '音乐资讯数量', v: musicCount },
           { k: '今日消费', v: fmtMoney(todayExp) },
-          { k: '本月消费', v: fmtMoney(monthExp), cls: 'good' },
-          { k: '利润计算记录', v: profit.length, cls: 'good' },
-          { k: '鉴定记录', v: auth.length, cls: 'accent' }
+          { k: '本月消费', v: fmtMoney(monthExp), cls: 'good' }
         ];
         $('#dashGrid', node).innerHTML = cards.map(function (c) {
           return '<div class="stat-card ' + (c.cls || '') + '"><div class="k">' + c.k + '</div><div class="v">' + c.v + '</div></div>';
         }).join('');
 
-        var counts = {};
-        inv.forEach(function (i) { counts[i.status || '未分类'] = (counts[i.status || '未分类'] || 0) + 1; });
-        $('#dashInv', node).innerHTML = Object.keys(counts).length
-          ? Object.keys(counts).map(function (k) { return '<div class="kv"><b>' + esc(k) + '</b>' + counts[k] + ' 张</div>'; }).join('')
-          : '<div class="empty" style="padding:14px">暂无库存</div>';
+        var lastAuth = auth.slice().sort(function (a, b) { return (b.createdAt || '').localeCompare(a.createdAt || ''); })[0];
+        $('#dashAuth', node).innerHTML = lastAuth
+          ? '<div class="item" style="padding:10px 0"><div class="body"><b>' + esc(lastAuth.album || lastAuth.catalog || '鉴定记录') + '</b> ' +
+            '<span class="tag ' + (lastAuth.score >= 90 ? 'good' : lastAuth.score >= 70 ? 'warn' : 'bad') + '">参考 ' + lastAuth.score + ' · ' + esc(lastAuth.advice || '') + '</span>' +
+            '<div class="meta">' + esc([lastAuth.catalog, lastAuth.country, lastAuth.year].filter(Boolean).join(' · ')) + '</div></div></div>'
+          : '<div class="empty" style="padding:10px 0">暂无鉴定记录</div>';
 
-        var last = auth.slice().sort(function (a, b) { return (b.createdAt || '').localeCompare(a.createdAt || ''); })[0];
-        $('#dashAuth', node).innerHTML = last
-          ? '<div class="item"><div class="body"><b>' + esc(last.album || last.catalog || '鉴定记录') + '</b> ' +
-            '<span class="tag ' + (last.score >= 85 ? 'good' : last.score >= 70 ? 'warn' : 'bad') + '">参考评分 ' + last.score + ' · ' + esc(last.advice || '') + '</span>' +
-            '<div class="meta">' + esc([last.catalog, last.country, last.year].filter(Boolean).join(' · ')) + '</div></div></div>'
-          : '<div class="empty" style="padding:14px">暂无鉴定记录</div>';
+        var lastSel = sel.slice().sort(function (a, b) { return (b.createdAt || '').localeCompare(a.createdAt || ''); })[0];
+        $('#dashSel', node).innerHTML = lastSel
+          ? '<div class="item" style="padding:10px 0"><div class="body"><b>' + esc(lastSel.name || '评分记录') + '</b> ' +
+            '<span class="tag ' + (lastSel.score >= 80 ? 'good' : lastSel.score >= 60 ? 'warn' : 'bad') + '">评分 ' + lastSel.score + ' · ' + esc(lastSel.advice || '') + '</span>' +
+            '<div class="meta">海外热度 ' + (lastSel.overseasHot || '-') + ' · 中国热度 ' + (lastSel.chinaHot || '-') + '</div></div></div>'
+          : '<div class="empty" style="padding:10px 0">暂无评分记录</div>';
+
+        var items = music && music.items ? music.items : [];
+        var lastMusic = items[0];
+        $('#dashMusic', node).innerHTML = lastMusic
+          ? '<div class="item" style="padding:10px 0"><div class="body"><b>' + esc(lastMusic.artist || '') + '</b> — ' + esc(lastMusic.album || '') +
+            ' <span class="tag">' + esc(lastMusic.region || '') + '</span> <span class="tag">' + esc(lastMusic.format || '') + '</span>' +
+            '<div class="meta">发布：' + esc(lastMusic.releaseDate || '') + ' · ' + esc(lastMusic.company || '') + '</div></div></div>'
+          : '<div class="empty" style="padding:10px 0">暂无音乐资讯</div>';
       });
     };
     return { node: node, refresh: node._refresh };
@@ -469,7 +472,6 @@
   function buildDataHub() {
     var actions = [
       { label: '更新今日汇率', fn: collectFx },
-      { label: '扫描全球黑胶市场', fn: collectPriceMonitor },
       { label: '查询 Discogs 黑胶资料', fn: collectDiscogs },
       { label: '采集全球音乐资讯', fn: collectMusicNews },
       { label: '采集今日热点', fn: collectHot },
@@ -545,8 +547,18 @@
           data.coverImg = imgs[0]; data.sleeveImg = imgs[1]; data.labelImg = imgs[2];
           var checks = CHECKS.filter(function (c) { return f[c.k] && f[c.k].checked; }).map(function (c) { return c.k; });
           var score = CHECKS.reduce(function (s, c) { return s + (checks.indexOf(c.k) >= 0 ? c.weight : 0); }, 0);
-          var advice = score >= 85 ? '正版概率高' : score >= 70 ? '需要确认' : '高风险';
-          data.checks = checks; data.score = score; data.advice = advice; data.createdAt = item.createdAt || new Date().toISOString();
+          var advice = score >= 90 ? '可信度较高' : score >= 70 ? '建议进一步确认' : '风险较高';
+          // 编号 / 版本 / 包装 匹配情况（人工核对结果）
+          var idMatch = checks.indexOf('catalogOk') >= 0 ? '编号与官方一致' : (data.catalog || data.matrix ? '编号未确认' : '未提供编号');
+          var verMatch = checks.indexOf('labelOk') >= 0 ? '版本信息一致' : '版本信息未确认';
+          var pkg = checks.indexOf('imgOk') >= 0 ? '已提供封套/标签照片可核对' : '缺少包装照片核对';
+          var critical = ['catalogOk', 'labelOk', 'priceOk', 'printOk', 'imgOk'];
+          var missing = critical.filter(function (k) { return checks.indexOf(k) < 0; })
+            .map(function (k) { return (CHECKS.find(function (c) { return c.k === k; }) || {}).l || k; });
+          var anomaly = missing.length ? '异常提示：' + missing.join('；') : '异常提示：未发现明显异常';
+          data.checks = checks; data.score = score; data.advice = advice;
+          data.idMatch = idMatch; data.verMatch = verMatch; data.pkg = pkg; data.anomaly = anomaly;
+          data.createdAt = item.createdAt || new Date().toISOString();
           if (editingId != null) data.id = editingId;
           var p = data.id ? VHDB.put('auth_records', data) : VHDB.add('auth_records', data);
           p.then(function () { toast('鉴定已保存', 'ok'); formWrap.classList.add('hidden'); editingId = null; refresh(); })
@@ -561,11 +573,15 @@
       VHDB.getAll('auth_records').then(function (rows) {
         if (!rows.length) { listWrap.innerHTML = '<div class="empty">暂无鉴定记录。点击「新建鉴定」开始。</div>'; return; }
         listWrap.innerHTML = '<div class="list">' + rows.map(function (r) {
-          var cls = r.score >= 85 ? 'good' : r.score >= 70 ? 'warn' : 'bad';
+          var cls = r.score >= 90 ? 'good' : r.score >= 70 ? 'warn' : 'bad';
           return '<div class="item"><div class="body">' +
             '<div class="row"><b>' + esc(r.album || r.catalog || '鉴定记录') + '</b>' +
             '<span class="tag ' + cls + '">真实性参考 ' + r.score + ' / 100 · ' + esc(r.advice) + '</span></div>' +
             '<div class="meta">' + esc([r.catalog, r.matrix, r.country, r.year].filter(Boolean).join(' · ')) + '</div>' +
+            '<div class="meta">编号匹配：' + esc(r.idMatch || '—') + '</div>' +
+            '<div class="meta">版本匹配：' + esc(r.verMatch || '—') + '</div>' +
+            '<div class="meta">包装情况：' + esc(r.pkg || '—') + '</div>' +
+            '<div class="meta">' + esc(r.anomaly || '') + '</div>' +
             '<div class="meta">核对通过 ' + (r.checks ? r.checks.length : 0) + ' / ' + CHECKS.length + ' 项</div>' +
             '<div class="thumbs">' + thumb(r.coverImg) + thumb(r.sleeveImg) + thumb(r.labelImg) + '</div></div>' +
             '<div class="row-actions"><button class="btn btn-sm" data-edit="' + r.id + '">编辑</button>' +
@@ -878,6 +894,83 @@
     setTimeout(function () { URL.revokeObjectURL(url); if (a.parentNode) a.parentNode.removeChild(a); }, 100);
   }
 
+  // 唱片网址收藏管理
+  function buildWebsites() {
+    var CATS = ['黑胶购买平台', '黑胶资料查询', '音乐资讯', '黑胶学习', '自定义分类'];
+    var node = elFrom('<div class="module"><div class="mod-head"><h2>🔗 唱片网址</h2>' +
+      '<div class="mod-actions"><button class="btn btn-primary" id="addBtn">＋ 添加网址</button></div></div>' +
+      '<div class="hint">收藏常用黑胶网站，支持自定义名称与分类（如把 Mercari 改名为「日本煤炉」）。点击「打开网站」在新标签页访问。所有记录永久保存。</div>' +
+      '<div style="margin:12px 0;display:flex;gap:10px;flex-wrap:wrap;align-items:center">' +
+      '<input type="search" id="wSearch" placeholder="搜索名称或分类" style="padding:9px 10px;border-radius:8px;border:1px solid var(--line);background:var(--bg-2);color:var(--text);width:240px">' +
+      '<select id="wFilter"><option value="">全部分类</option>' + CATS.map(function (c) { return '<option>' + c + '</option>'; }).join('') + '</select></div>' +
+      '<div class="form-wrap hidden" id="formWrap"></div>' +
+      '<div class="list-wrap" id="listWrap"><div class="empty">加载中…</div></div></div>');
+    var listWrap = node.querySelector('#listWrap');
+    var formWrap = node.querySelector('#formWrap');
+    var search = node.querySelector('#wSearch');
+    var filter = node.querySelector('#wFilter');
+    var editingId = null;
+
+    function buildForm(item) {
+      item = item || {};
+      var html = '<form id="wForm"><div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">' +
+        '<label>网站名称<input type="text" name="name" value="' + esc(item.name) + '" placeholder="如：日本煤炉"></label>' +
+        '<label>网址链接<input type="url" name="url" value="' + esc(item.url) + '" placeholder="https://..."></label>' +
+        '<label class="full">分类（可自定义）<input type="text" name="category" list="wCats" value="' + esc(item.category) + '">' +
+        '<datalist id="wCats">' + CATS.map(function (c) { return '<option value="' + c + '">'; }).join('') + '</datalist></label>' +
+        '<label class="full">备注<textarea name="note">' + esc(item.note) + '</textarea></label>' +
+        '</div><div class="form-btns"><button type="submit" class="btn btn-primary">保存</button><button type="button" class="btn" id="cancelBtn">取消</button></div></form>';
+      formWrap.innerHTML = html; formWrap.classList.remove('hidden');
+      formWrap.querySelector('#cancelBtn').onclick = function () { formWrap.classList.add('hidden'); editingId = null; };
+      formWrap.querySelector('#wForm').onsubmit = function (e) {
+        e.preventDefault(); var f = e.target;
+        var data = { name: f.name.value.trim(), url: f.url.value.trim(), category: f.category.value.trim(), note: f.note.value.trim() };
+        if (!data.name) { toast('请填写网站名称', 'err'); return; }
+        if (!/^https?:\/\//i.test(data.url)) data.url = data.url ? 'https://' + data.url : '';
+        data.createdAt = item.createdAt || new Date().toISOString();
+        if (editingId != null) data.id = editingId;
+        var p = data.id ? VHDB.put('websites', data) : VHDB.add('websites', data);
+        p.then(function () { toast('已保存', 'ok'); formWrap.classList.add('hidden'); editingId = null; refresh(); })
+          .catch(function (er) { toast('保存失败：' + er.message, 'err'); });
+      };
+    }
+
+    function refresh() {
+      var q = (search.value || '').toLowerCase();
+      var cat = filter.value;
+      VHDB.getAll('websites').then(function (rows) {
+        rows = rows.filter(function (r) {
+          var hit = !q || (r.name || '').toLowerCase().indexOf(q) >= 0 || (r.category || '').toLowerCase().indexOf(q) >= 0;
+          var catOk = !cat || r.category === cat;
+          return hit && catOk;
+        });
+        if (!rows.length) { listWrap.innerHTML = '<div class="empty">暂无网址，点击「＋ 添加网址」开始收藏。</div>'; return; }
+        listWrap.innerHTML = '<div class="list">' + rows.map(function (r) {
+          var open = r.url ? '<a class="btn btn-sm" href="' + esc(r.url) + '" target="_blank" rel="noopener">打开网站 ↗</a>' : '<span class="muted">无链接</span>';
+          return '<div class="item"><div class="body"><div class="row"><b>' + esc(r.name) + '</b>' +
+            (r.category ? '<span class="tag">' + esc(r.category) + '</span>' : '') + '</div>' +
+            (r.url ? '<div class="meta">' + esc(r.url) + '</div>' : '') +
+            (r.note ? '<div class="meta">' + esc(r.note) + '</div>' : '') +
+            '<div class="meta">添加于 ' + esc((r.createdAt || '').slice(0, 10)) + '</div></div>' +
+            '<div class="row-actions">' + open +
+            '<button class="btn btn-sm" data-edit="' + r.id + '">编辑</button>' +
+            '<button class="btn btn-sm btn-danger" data-del="' + r.id + '">删除</button></div></div>';
+        }).join('') + '</div>';
+        $$('[data-edit]', listWrap).forEach(function (b) {
+          b.onclick = function () { var it = rows.find(function (x) { return x.id == b.dataset.edit; }); editingId = it.id; buildForm(it); window.scrollTo({ top: 0, behavior: 'smooth' }); };
+        });
+        $$('[data-del]', listWrap).forEach(function (b) {
+          b.onclick = function () { if (confirm('确认删除该网址？')) VHDB.del('websites', Number(b.dataset.del)).then(function () { toast('已删除'); refresh(); }); };
+        });
+      });
+    }
+    node.querySelector('#addBtn').onclick = function () { editingId = null; buildForm({}); };
+    search.oninput = refresh;
+    filter.onchange = refresh;
+    node._refresh = refresh;
+    return { node: node, refresh: refresh };
+  }
+
   // 系统设置
   function buildSettings() {
     var node = elFrom('<div class="module"><h2>系统设置</h2>' +
@@ -888,22 +981,21 @@
       '<label class="full" style="display:flex;flex-direction:column;gap:5px;margin-bottom:10px">音乐资讯源（返回 JSON 数组或 {items:[...]} 的 URL）<input name="musicNewsSource"></label>' +
       '<label class="full" style="display:flex;flex-direction:column;gap:5px;margin-bottom:10px">抖音热点源（返回 {videos:[...],accounts:[...]} 的 URL）<input name="hotTopicSource"></label>' +
       '<label class="full" style="display:flex;flex-direction:column;gap:5px;margin-bottom:10px">热门音频源（返回数组或 {audios:[...]} 的 URL）<input name="audioSource"></label>' +
-      '<label class="full" style="display:flex;flex-direction:column;gap:5px;margin-bottom:10px">价格监控源（多个用英文逗号分隔，每个返回价格数组）<input name="priceMonitorSources"></label>' +
       '<div class="form-btns"><button type="submit" class="btn btn-primary">保存设置</button></div>' +
       '</form></div>' +
       '<div class="hint">未配置数据源时，各采集按钮会提示手动添加；手动录入始终是可靠主路径。汇率接口为免费公共服务，无需配置即可使用。</div></div>');
     VHDB.getConfig().then(function (cfg) {
       var f = node.querySelector('#cfgForm');
-      ['displayName', 'theme', 'discogsToken', 'musicNewsSource', 'hotTopicSource', 'audioSource', 'priceMonitorSources'].forEach(function (k) {
+      ['displayName', 'theme', 'discogsToken', 'musicNewsSource', 'hotTopicSource', 'audioSource'].forEach(function (k) {
         if (cfg[k] != null) f[k].value = cfg[k];
       });
       applyTheme(cfg.theme || 'light');
     });
     node.querySelector('#cfgForm').onsubmit = function (e) {
-      e.preventDefault(); var f = e.target; var cfg = {
+      e.preventDefault(); var f = e.target;       var cfg = {
         displayName: f.displayName.value, theme: f.theme.value, discogsToken: f.discogsToken.value,
         musicNewsSource: f.musicNewsSource.value, hotTopicSource: f.hotTopicSource.value,
-        audioSource: f.audioSource.value, priceMonitorSources: f.priceMonitorSources.value
+        audioSource: f.audioSource.value
       };
       VHDB.setConfig(cfg).then(function () { applyTheme(cfg.theme); toast('设置已保存', 'ok'); });
     };
@@ -921,6 +1013,7 @@
     else if (id === 'dashboard') mod = buildDashboard();
     else if (id === 'datahub') mod = buildDataHub();
     else if (id === 'auth') mod = buildAuth();
+    else if (id === 'websites') mod = buildWebsites();
     else if (id === 'plan') mod = buildPlan();
     else if (id === 'hot') mod = buildHot();
     else if (id === 'musicnews') mod = buildMusicNews();

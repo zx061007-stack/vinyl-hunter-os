@@ -17,7 +17,7 @@
     'exchange_rates',  // 实时汇率 (key=date)
     'expenses',        // 消费记账 (auto id)
     'discogs_db',      // Discogs 黑胶数据库 (auto id)
-    'price_monitor',   // 全球黑胶价格监控 (auto id)
+    'websites',       // 唱片网址收藏 (auto id)
     'auth_records',    // 真假鉴定记录 (auto id)
     'selection_scores',// 选品评分记录 (auto id)
     'profit_calcs',    // 利润计算记录 (auto id)
