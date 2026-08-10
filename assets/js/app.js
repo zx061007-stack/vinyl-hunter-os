@@ -78,26 +78,6 @@
       });
     });
   }
-  function collectDiscogs() {
-    var q = prompt('输入要查询的黑胶专辑名称 / 艺术家：');
-    if (!q) return Promise.resolve();
-    return VHDB.getConfig().then(function (cfg) {
-      if (!cfg.discogsToken) { toast('请先在「系统设置」填写 Discogs Token', 'err'); return; }
-      return VHAPI.fetchDiscogs(q, cfg.discogsToken).then(function (list) {
-        if (!list.length) { toast('未找到相关结果'); return; }
-        list = list.map(function (it) {
-          var v = (it.version || '').toLowerCase();
-          it.press = /first|1st|首版/.test(v) ? '首版' : (/reissue|repress|再版/.test(v) ? '再版' : '');
-          it.colored = /colou?r|彩胶/.test(v) ? '是' : '否';
-          it.picture = /picture/.test(v) ? '是' : '否';
-          it.limited = /limited|限量/.test(v) ? '限量' : '';
-          return it;
-        });
-        return Promise.all(list.map(function (it) { return VHDB.add('discogs_db', it); }))
-          .then(function () { toast('已采集 ' + list.length + ' 条 Discogs 资料', 'ok'); });
-      });
-    });
-  }
   function collectMusicNews() {
     return VHDB.getConfig().then(function (cfg) {
       if (!cfg.musicNewsSource) { toast('未配置资讯源，请在系统设置配置或使用手动添加', 'err'); return; }
@@ -295,26 +275,6 @@
 
   /* ---------------- 记录模块配置（精简后保留） ---------------- */
   var RECORD_CONFIGS = {
-    discogs: {
-      title: 'Discogs 黑胶数据库', store: 'discogs_db',
-      collect: { label: '查询黑胶资料', fn: collectDiscogs },
-      fields: [
-        { k: 'artist', l: '艺术家', t: 'text' },
-        { k: 'album', l: '专辑名称', t: 'text' },
-        { k: 'catalog', l: 'Catalog Number', t: 'text' },
-        { k: 'label', l: '发行公司', t: 'text' },
-        { k: 'year', l: '年份', t: 'number' },
-        { k: 'country', l: '国家', t: 'text' },
-        { k: 'version', l: '版本信息', t: 'text' },
-        { k: 'press', l: '首版/再版', t: 'select', opts: ['', '首版', '再版', '未知'] },
-        { k: 'colored', l: '彩胶', t: 'select', opts: ['', '是', '否'] },
-        { k: 'picture', l: 'Picture Vinyl', t: 'select', opts: ['', '是', '否'] },
-        { k: 'limited', l: '限量信息', t: 'text' },
-        { k: 'weight', l: '重量', t: 'text' },
-        { k: 'marketPrice', l: '市场参考价格', t: 'number' }
-      ],
-      cols: ['catalog', 'label', 'year', 'country', 'version', 'press', 'colored', 'picture', 'limited', 'weight', 'marketPrice']
-    },
     selection: {
       title: '黑胶选品评分', store: 'selection_scores', derive: deriveSelection,
       fields: [
@@ -349,18 +309,6 @@
       ],
       cols: ['name', 'catalog', 'discogsPrice', 'buyPrice']
     },
-    inventory: {
-      title: '黑胶库存管理', store: 'inventory',
-      fields: [
-        { k: 'name', l: '名称', t: 'text' },
-        { k: 'singer', l: '歌手', t: 'text' },
-        { k: 'version', l: '版本', t: 'text' },
-        { k: 'buyDate', l: '购买日期', t: 'text' },
-        { k: 'buyPrice', l: '采购价格', t: 'number' },
-        { k: 'status', l: '状态', t: 'select', opts: ['待出售', '已出售'], tag: true }
-      ],
-      cols: ['name', 'singer', 'version', 'buyDate', 'buyPrice', 'status']
-    },
     expense: {
       title: '消费记账', store: 'expenses',
       fields: [
@@ -370,17 +318,9 @@
       ],
       cols: ['date', 'amount', 'note']
     },
-    crm: {
-      title: '客户 CRM', store: 'crm',
-      fields: [
-        { k: 'name', l: '客户昵称', t: 'text' },
-        { k: 'source', l: '来源', t: 'text' },
-        { k: 'favArtist', l: '喜欢歌手', t: 'text' },
-        { k: 'purchases', l: '购买记录', t: 'textarea' }
-      ],
-      cols: ['name', 'source', 'favArtist']
-    }
   };
+  // 注：discogs / inventory / crm 已改为自定义联动模块（见 buildDiscogs / buildInventory / buildCrm），
+  // 不再使用通用 createRecordManager。
 
   /* ---------------- 自定义模块 ---------------- */
 
@@ -431,10 +371,11 @@
         var rate = planTotal ? Math.round(planDone / planTotal * 100) : 0;
         var todayExp = exps.filter(function (e) { return e.date === todayStr(); }).reduce(function (s, e) { return s + (Number(e.amount) || 0); }, 0);
         var monthExp = exps.filter(function (e) { return monthStr(e.date) === monthStr(); }).reduce(function (s, e) { return s + (Number(e.amount) || 0); }, 0);
+        var stockTotal = inv.reduce(function (s, i) { return s + (Number(i.stockQty) || 0); }, 0);
 
         var cards = [
           { k: '今日任务完成率', v: rate + '<small>%</small>', cls: 'accent' },
-          { k: '库存数量', v: inv.length },
+          { k: '库存数量', v: stockTotal + '<small> 张</small>' },
           { k: '今日消费', v: fmtMoney(todayExp) },
           { k: '本月消费', v: fmtMoney(monthExp), cls: 'good' }
         ];
@@ -472,7 +413,7 @@
   function buildDataHub() {
     var actions = [
       { label: '更新今日汇率', fn: collectFx },
-      { label: '查询 Discogs 黑胶资料', fn: collectDiscogs },
+      { label: '查询 Discogs 黑胶资料', fn: function () { showView('discogs'); } },
       { label: '采集全球音乐资讯', fn: collectMusicNews },
       { label: '采集今日热点', fn: collectHot },
       { label: '采集热门音频', fn: collectAudio }
@@ -978,6 +919,7 @@
       '<label class="full" style="display:flex;flex-direction:column;gap:5px;margin-bottom:10px">显示名称<input name="displayName"></label>' +
       '<label style="display:flex;flex-direction:column;gap:5px;margin-bottom:10px">主题<select name="theme"><option value="light">浅色（米白）</option><option value="dark">墨绿深色</option></select></label>' +
       '<label class="full" style="display:flex;flex-direction:column;gap:5px;margin-bottom:10px">Discogs Token（用于黑胶资料查询）<input name="discogsToken" placeholder="在 discogs.com/settings/developers 申请"></label>' +
+      '<label class="full" style="display:flex;flex-direction:column;gap:5px;margin-bottom:10px">Discogs 代理地址（可选，解决浏览器跨域；Cloudflare Worker 等，留空走直连）<input name="discogsProxy" placeholder="https://你的worker.dev"></label>' +
       '<label class="full" style="display:flex;flex-direction:column;gap:5px;margin-bottom:10px">音乐资讯源（返回 JSON 数组或 {items:[...]} 的 URL）<input name="musicNewsSource"></label>' +
       '<label class="full" style="display:flex;flex-direction:column;gap:5px;margin-bottom:10px">抖音热点源（返回 {videos:[...],accounts:[...]} 的 URL）<input name="hotTopicSource"></label>' +
       '<label class="full" style="display:flex;flex-direction:column;gap:5px;margin-bottom:10px">热门音频源（返回数组或 {audios:[...]} 的 URL）<input name="audioSource"></label>' +
@@ -986,7 +928,7 @@
       '<div class="hint">未配置数据源时，各采集按钮会提示手动添加；手动录入始终是可靠主路径。汇率接口为免费公共服务，无需配置即可使用。</div></div>');
     VHDB.getConfig().then(function (cfg) {
       var f = node.querySelector('#cfgForm');
-      ['displayName', 'theme', 'discogsToken', 'musicNewsSource', 'hotTopicSource', 'audioSource'].forEach(function (k) {
+      ['displayName', 'theme', 'discogsToken', 'discogsProxy', 'musicNewsSource', 'hotTopicSource', 'audioSource'].forEach(function (k) {
         if (cfg[k] != null) f[k].value = cfg[k];
       });
       applyTheme(cfg.theme || 'light');
@@ -994,6 +936,7 @@
     node.querySelector('#cfgForm').onsubmit = function (e) {
       e.preventDefault(); var f = e.target;       var cfg = {
         displayName: f.displayName.value, theme: f.theme.value, discogsToken: f.discogsToken.value,
+        discogsProxy: f.discogsProxy.value,
         musicNewsSource: f.musicNewsSource.value, hotTopicSource: f.hotTopicSource.value,
         audioSource: f.audioSource.value
       };
@@ -1003,6 +946,350 @@
     return { node: node, refresh: function () {} };
   }
   function applyTheme(t) { document.documentElement.setAttribute('data-theme', t || 'light'); }
+
+  /* ---------------- Discogs 黑胶数据库（查询中心，联动库存） ---------------- */
+  function buildDiscogs() {
+    var node = elFrom('<div class="module"><div class="mod-head"><h2>💿 Discogs 黑胶数据库</h2>' +
+      '<div class="mod-actions"><button class="btn btn-collect" id="qBtn">🔍 查询专辑信息</button></div></div>' +
+      '<div class="hint">查询中心：默认查询结果<b>不自动保存</b>。确认入库时点击【保存到黑胶库存】才会写入库存管理。所有查询均点击按钮触发。</div>' +
+      '<div class="form-wrap" id="qForm" style="margin:14px 0">' +
+      '<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px">' +
+      '<label>专辑名称<input type="text" id="qAlbum" placeholder="如 Nevermind"></label>' +
+      '<label>歌手<input type="text" id="qArtist" placeholder="如 Nirvana"></label>' +
+      '<label>Catalog Number<input type="text" id="qCat" placeholder="如 ABCD-123"></label>' +
+      '</div></div>' +
+      '<div class="section-title">查询结果</div>' +
+      '<div id="dResults"><div class="empty">输入查询条件后点击「查询专辑信息」。</div></div>' +
+      '<div class="section-title">专辑详情</div>' +
+      '<div id="dDetail"><div class="empty">点击某条结果「查看详情」查看完整资料。</div></div></div>');
+
+    var resultsEl = node.querySelector('#dResults');
+    var detailEl = node.querySelector('#dDetail');
+    var currentResults = [];
+    var selected = null;
+
+    function rowKV(k, v) { return '<div class="kv"><span class="kk">' + esc(k) + '</span><span class="vv">' + esc(v == null ? '' : v) + '</span></div>'; }
+
+    node.querySelector('#qBtn').onclick = function () {
+      var album = node.querySelector('#qAlbum').value.trim();
+      var artist = node.querySelector('#qArtist').value.trim();
+      var cat = node.querySelector('#qCat').value.trim();
+      var q = cat || [artist, album].filter(Boolean).join(' ');
+      if (!q) { toast('请填写专辑名称 / 歌手 / Catalog 至少一项', 'err'); return; }
+      var b = node.querySelector('#qBtn'); b.disabled = true; var old = b.textContent; b.textContent = '查询中…';
+      VHDB.getConfig().then(function (cfg) {
+        if (!cfg.discogsToken) { toast('请先在「系统设置」填写 Discogs Token', 'err'); return; }
+        return VHAPI.fetchDiscogs(q, cfg.discogsToken, cfg.discogsProxy).then(function (list) {
+          currentResults = list;
+          if (!list.length) { resultsEl.innerHTML = '<div class="empty">未找到相关结果。</div>'; return; }
+          resultsEl.innerHTML = '<div class="list">' + list.map(function (it, i) {
+            var cover = it.cover ? '<img src="' + esc(it.cover) + '" alt="" style="width:54px;height:54px;object-fit:cover;border-radius:6px">' : '<div class="noimg">💿</div>';
+            return '<div class="item"><div class="body" style="display:flex;gap:12px;align-items:center">' + cover +
+              '<div style="flex:1"><b>' + esc(it.artist || '') + (it.album ? ' — ' + esc(it.album) : '') + '</b>' +
+              '<div class="meta">' + esc([it.year, it.country, it.catalog].filter(Boolean).join(' · ')) + '</div>' +
+              '<div class="meta">' + esc(it.version || '') + '</div></div>' +
+              '<div class="row-actions"><button class="btn btn-sm" data-detail="' + i + '">查看详情</button>' +
+              '<button class="btn btn-sm btn-primary" data-save="' + i + '">保存到库存</button></div></div></div>';
+          }).join('') + '</div>';
+          $$('[data-detail]', resultsEl).forEach(function (btn) {
+            btn.onclick = function () { showDetail(Number(btn.dataset.detail), cfg); };
+          });
+          $$('[data-save]', resultsEl).forEach(function (btn) {
+            btn.onclick = function () { saveToInventory(list[Number(btn.dataset.save)]); };
+          });
+        });
+      }).catch(function (e) { toast('查询失败：' + e.message, 'err'); })
+        .then(function () { b.disabled = false; b.textContent = old; });
+    };
+
+    function showDetail(idx, cfg) {
+      var it = currentResults[idx];
+      selected = it;
+      detailEl.innerHTML = '<div class="empty">加载详情中…</div>';
+      var p = it.id
+        ? VHAPI.fetchDiscogsRelease(it.id, cfg.discogsToken, cfg.discogsProxy)
+        : Promise.resolve(it);
+      p.then(function (d) {
+        d = d || it;
+        var cover = d.cover ? '<img src="' + esc(d.cover) + '" alt="封面" style="max-width:160px;border-radius:8px">' : '';
+        var imgs = (d.images || []).slice(0, 4).map(function (u) { return '<img src="' + esc(u) + '" alt="" style="width:80px;height:80px;object-fit:cover;border-radius:6px">'; }).join('');
+        detailEl.innerHTML =
+          '<div class="card"><div style="display:flex;gap:14px;flex-wrap:wrap">' + cover +
+          '<div style="flex:1;min-width:240px">' +
+          '<h3>' + esc(d.artist || '') + (d.album ? ' — ' + esc(d.album) : '') + '</h3>' +
+          rowKV('发行年份', d.year) + rowKV('发行国家', d.country) + rowKV('音乐类型', d.genre || d.style || '—') +
+          '</div></div>' +
+          '<div class="kv-grid">' +
+          rowKV('发行公司', d.label) + rowKV('Catalog Number', d.catalog) +
+          rowKV('版本信息', d.version) + rowKV('限量 / 重量', d.limited || '—') +
+          rowKV('Discogs 参考价', d.marketPrice ? (d.marketPrice + ' ' + (d.priceCurrency || '')) : '—') +
+          '</div>' +
+          (imgs ? '<div class="section-title">图片</div><div class="thumbs">' + imgs + '</div>' : '') +
+          '<div class="form-btns"><button class="btn btn-primary" id="saveDetail">保存到黑胶库存</button></div></div>';
+        detailEl.querySelector('#saveDetail').onclick = function () { saveToInventory(d); };
+      }).catch(function (e) { detailEl.innerHTML = '<div class="empty">详情加载失败：' + esc(e.message) + '</div>'; });
+    }
+
+    function saveToInventory(it) {
+      var data = {
+        cover: it.cover || '',
+        name: it.album || it.name || '',
+        singer: it.artist || '',
+        catalog: it.catalog || '',
+        version: it.version || '',
+        year: it.year || '',
+        label: it.label || '',
+        country: it.country || '',
+        weight: it.weight || '',
+        limited: it.limited || '',
+        buyDate: todayStr(),
+        buyPrice: '',
+        stockQty: 1,
+        status: '在售',
+        createdAt: new Date().toISOString()
+      };
+      VHDB.add('inventory', data).then(function () {
+        toast('已保存到黑胶库存（请补充购买价格 / 数量）', 'ok');
+        showView('inventory');
+      }).catch(function (e) { toast('保存失败：' + e.message, 'err'); });
+    }
+
+    node._refresh = function () {};
+    return { node: node, refresh: function () {} };
+  }
+
+  /* ---------------- 黑胶库存管理（联动 Discogs + CRM） ---------------- */
+  function buildInventory() {
+    var STATUS = ['在售', '已出售'];
+    var node = elFrom('<div class="module"><div class="mod-head"><h2>📦 黑胶库存管理</h2>' +
+      '<div class="mod-actions"><button class="btn btn-primary" id="addBtn">＋ 添加库存</button></div></div>' +
+      '<div class="hint">与 Discogs 联动：输入 Catalog Number 后点「Discogs 查询并填充」自动回填资料。客户在 CRM 购买后，库存数量自动扣减。</div>' +
+      '<div style="margin:12px 0;display:flex;gap:10px;flex-wrap:wrap;align-items:center">' +
+      '<input type="search" id="iSearch" placeholder="搜索名称 / 歌手 / Catalog" style="padding:9px 10px;border-radius:8px;border:1px solid var(--line);background:var(--bg-2);color:var(--text);width:260px">' +
+      '<select id="iFilter"><option value="">全部状态</option>' + STATUS.map(function (s) { return '<option>' + s + '</option>'; }).join('') + '</select></div>' +
+      '<div class="form-wrap hidden" id="formWrap"></div>' +
+      '<div class="list-wrap" id="listWrap"><div class="empty">加载中…</div></div></div>');
+    var listWrap = node.querySelector('#listWrap');
+    var formWrap = node.querySelector('#formWrap');
+    var search = node.querySelector('#iSearch');
+    var filter = node.querySelector('#iFilter');
+    var editingId = null;
+    var pendingCover = '';
+
+    function buildForm(item) {
+      item = item || {};
+      pendingCover = item.cover || '';
+      var html = '<form id="iForm"><div class="discogs-fill">' +
+        '<label>通过 Catalog Number 自动填充<input type="text" id="fillCat" placeholder="输入 Catalog 如 ABCD-123"></label>' +
+        '<button type="button" class="btn btn-collect" id="fillBtn">Discogs 查询并填充</button></div>' +
+        '<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:12px">' +
+        '<label class="full">封面图片<input type="file" id="coverFile" accept="image/*"></label>' +
+        '<div id="coverPrev" class="full">' + (item.cover ? '<img src="' + esc(item.cover) + '" style="max-width:120px;border-radius:8px">' : '') + '</div>' +
+        '<label>黑胶名称<input type="text" name="name" value="' + esc(item.name) + '"></label>' +
+        '<label>歌手<input type="text" name="singer" value="' + esc(item.singer) + '"></label>' +
+        '<label>Catalog Number<input type="text" name="catalog" value="' + esc(item.catalog) + '"></label>' +
+        '<label>版本信息<input type="text" name="version" value="' + esc(item.version) + '"></label>' +
+        '<label>发行年份<input type="text" name="year" value="' + esc(item.year) + '"></label>' +
+        '<label>发行公司<input type="text" name="label" value="' + esc(item.label) + '"></label>' +
+        '<label>发行国家<input type="text" name="country" value="' + esc(item.country) + '"></label>' +
+        '<label>黑胶重量<input type="text" name="weight" value="' + esc(item.weight) + '" placeholder="如 180g"></label>' +
+        '<label>限量信息<input type="text" name="limited" value="' + esc(item.limited) + '"></label>' +
+        '<label>购买日期<input type="date" name="buyDate" value="' + esc(item.buyDate || todayStr()) + '"></label>' +
+        '<label>购买价格<input type="number" step="any" name="buyPrice" value="' + esc(item.buyPrice) + '"></label>' +
+        '<label>库存数量<input type="number" min="0" name="stockQty" value="' + esc(item.stockQty != null ? item.stockQty : 1) + '"></label>' +
+        '<label>当前状态<select name="status">' + STATUS.map(function (s) { return '<option value="' + s + '"' + (s === (item.status || '在售') ? ' selected' : '') + '>' + s + '</option>'; }).join('') + '</select></label>' +
+        '</div>' +
+        '<div class="form-btns"><button type="submit" class="btn btn-primary">保存</button><button type="button" class="btn" id="cancelBtn">取消</button></div></form>';
+      formWrap.innerHTML = html; formWrap.classList.remove('hidden');
+      var form = formWrap.querySelector('#iForm');
+      form.querySelector('#coverFile').onchange = function (e) {
+        readFileAsDataURL(e.target.files[0]).then(function (u) {
+          pendingCover = u;
+          form.querySelector('#coverPrev').innerHTML = u ? '<img src="' + esc(u) + '" style="max-width:120px;border-radius:8px">' : '';
+        });
+      };
+      form.querySelector('#cancelBtn').onclick = function () { formWrap.classList.add('hidden'); editingId = null; };
+      form.querySelector('#fillBtn').onclick = function () {
+        var cat = form.querySelector('#fillCat').value.trim();
+        if (!cat) { toast('请输入 Catalog Number', 'err'); return; }
+        VHDB.getConfig().then(function (cfg) {
+          if (!cfg.discogsToken) { toast('请先在「系统设置」填写 Discogs Token', 'err'); return; }
+          var b = form.querySelector('#fillBtn'); b.disabled = true; var old = b.textContent; b.textContent = '查询中…';
+          return VHAPI.fetchDiscogs(cat, cfg.discogsToken, cfg.discogsProxy).then(function (list) {
+            if (!list.length) { toast('未找到该 Catalog 的资料'); return; }
+            var it = list[0];
+            form.querySelector('[name=name]').value = it.album || '';
+            form.querySelector('[name=singer]').value = it.artist || '';
+            form.querySelector('[name=catalog]').value = it.catalog || '';
+            form.querySelector('[name=version]').value = it.version || '';
+            form.querySelector('[name=year]').value = it.year || '';
+            form.querySelector('[name=label]').value = it.label || '';
+            form.querySelector('[name=country]').value = it.country || '';
+            if (it.cover) { pendingCover = it.cover; form.querySelector('#coverPrev').innerHTML = '<img src="' + esc(it.cover) + '" style="max-width:120px;border-radius:8px">'; }
+            toast('已填充，请补充价格 / 数量 / 状态', 'ok');
+          });
+        }).catch(function (e) { toast('查询失败：' + e.message, 'err'); })
+          .then(function () { var b = form.querySelector('#fillBtn'); if (b) { b.disabled = false; b.textContent = old; } });
+      };
+      form.onsubmit = function (e) {
+        e.preventDefault();
+        var f = e.target;
+        var data = {
+          cover: pendingCover,
+          name: f.name.value.trim(), singer: f.singer.value.trim(), catalog: f.catalog.value.trim(),
+          version: f.version.value.trim(), year: f.year.value.trim(), label: f.label.value.trim(),
+          country: f.country.value.trim(), weight: f.weight.value.trim(), limited: f.limited.value.trim(),
+          buyDate: f.buyDate.value, buyPrice: f.buyPrice.value === '' ? '' : Number(f.buyPrice.value),
+          stockQty: Number(f.stockQty.value) || 0, status: f.status.value
+        };
+        if (!data.name) { toast('请填写黑胶名称', 'err'); return; }
+        if (editingId != null) data.id = editingId;
+        var p = data.id ? VHDB.put('inventory', data) : VHDB.add('inventory', data);
+        p.then(function () { toast('已保存', 'ok'); formWrap.classList.add('hidden'); editingId = null; refresh(); })
+          .catch(function (er) { toast('保存失败：' + er.message, 'err'); });
+      };
+    }
+
+    function refresh() {
+      var q = (search.value || '').toLowerCase();
+      var st = filter.value;
+      VHDB.getAll('inventory').then(function (rows) {
+        rows = rows.filter(function (r) {
+          var hit = !q || (r.name || '').toLowerCase().indexOf(q) >= 0 || (r.singer || '').toLowerCase().indexOf(q) >= 0 || (r.catalog || '').toLowerCase().indexOf(q) >= 0;
+          var stOk = !st || r.status === st;
+          return hit && stOk;
+        });
+        if (!rows.length) { listWrap.innerHTML = '<div class="empty">暂无库存，点击「＋ 添加库存」开始。</div>'; return; }
+        listWrap.innerHTML = '<div class="list">' + rows.map(function (r) {
+          var cover = r.cover ? '<img src="' + esc(r.cover) + '" alt="" style="width:52px;height:52px;object-fit:cover;border-radius:6px">' : '<div class="noimg">💿</div>';
+          var cls = r.status === '已出售' ? 'bad' : 'good';
+          return '<div class="item"><div class="body" style="display:flex;gap:12px;align-items:center">' + cover +
+            '<div style="flex:1"><b>' + esc(r.name) + '</b> <span class="tag">' + esc(r.singer || '') + '</span>' +
+            '<div class="meta">' + esc([r.catalog, r.version, r.year, r.label].filter(Boolean).join(' · ')) + '</div>' +
+            '<div class="meta">库存数量：<b>' + (r.stockQty != null ? r.stockQty : 0) + '</b> 张 · 采购价 ' + (r.buyPrice !== '' && r.buyPrice != null ? fmtMoney(r.buyPrice) : '—') + ' · ' + esc(r.buyDate || '') + '</div></div>' +
+            '<span class="tag ' + cls + '">' + esc(r.status) + '</span>' +
+            '<div class="row-actions"><button class="btn btn-sm" data-edit="' + r.id + '">编辑</button>' +
+            '<button class="btn btn-sm btn-danger" data-del="' + r.id + '">删除</button></div></div></div>';
+        }).join('') + '</div>';
+        $$('[data-edit]', listWrap).forEach(function (b) {
+          b.onclick = function () { var it = rows.find(function (x) { return x.id == b.dataset.edit; }); editingId = it.id; buildForm(it); window.scrollTo({ top: 0, behavior: 'smooth' }); };
+        });
+        $$('[data-del]', listWrap).forEach(function (b) {
+          b.onclick = function () { if (confirm('确认删除该库存记录？')) VHDB.del('inventory', Number(b.dataset.del)).then(function () { toast('已删除'); refresh(); }); };
+        });
+      });
+    }
+    node.querySelector('#addBtn').onclick = function () { editingId = null; buildForm({}); };
+    search.oninput = refresh;
+    filter.onchange = refresh;
+    node._refresh = refresh;
+    return { node: node, refresh: refresh };
+  }
+
+  /* ---------------- 客户 CRM（联动库存扣减） ---------------- */
+  function buildCrm() {
+    var node = elFrom('<div class="module"><div class="mod-head"><h2>👥 客户 CRM</h2>' +
+      '<div class="mod-actions"><button class="btn btn-primary" id="addBtn">＋ 添加客户</button>' +
+      '<button class="btn btn-collect" id="addBuy">＋ 添加购买记录</button></div></div>' +
+      '<div class="hint">客户购买黑胶后，添加购买记录将<b>自动扣减库存数量</b>。专辑从「黑胶库存管理」中选择。</div>' +
+      '<div class="form-wrap hidden" id="formWrap"></div>' +
+      '<div class="list-wrap" id="listWrap"><div class="empty">加载中…</div></div></div>');
+    var listWrap = node.querySelector('#listWrap');
+    var formWrap = node.querySelector('#formWrap');
+    var editingId = null;
+
+    function buildCustForm(item) {
+      item = item || {};
+      var html = '<form id="custForm"><div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">' +
+        '<label>客户昵称<input type="text" name="name" value="' + esc(item.name) + '"></label>' +
+        '<label>联系方式（可选）<input type="text" name="contact" value="' + esc(item.contact) + '"></label>' +
+        '<label>喜欢歌手<input type="text" name="favArtist" value="' + esc(item.favArtist) + '"></label>' +
+        '<label>收藏方向<input type="text" name="collectDir" value="' + esc(item.collectDir) + '" placeholder="如 周杰伦 / KPOP / 动漫"></label>' +
+        '</div><div class="form-btns"><button type="submit" class="btn btn-primary">保存</button><button type="button" class="btn" id="cancelBtn">取消</button></div></form>';
+      formWrap.innerHTML = html; formWrap.classList.remove('hidden');
+      var form = formWrap.querySelector('#custForm');
+      form.querySelector('#cancelBtn').onclick = function () { formWrap.classList.add('hidden'); editingId = null; };
+      form.onsubmit = function (e) {
+        e.preventDefault();
+        var f = e.target;
+        var data = { name: f.name.value.trim(), contact: f.contact.value.trim(), favArtist: f.favArtist.value.trim(), collectDir: f.collectDir.value.trim(), purchases: (item.purchases || []) };
+        if (!data.name) { toast('请填写客户昵称', 'err'); return; }
+        if (editingId != null) data.id = editingId;
+        var p = data.id ? VHDB.put('crm', data) : VHDB.add('crm', data);
+        p.then(function () { toast('已保存', 'ok'); formWrap.classList.add('hidden'); editingId = null; refresh(); })
+          .catch(function (er) { toast('保存失败：' + er.message, 'err'); });
+      };
+    }
+
+    function buildBuyForm() {
+      Promise.all([VHDB.getAll('crm'), VHDB.getAll('inventory')]).then(function (r) {
+        var customers = r[0], inv = r[1];
+        if (!customers.length) { toast('请先添加客户', 'err'); return; }
+        if (!inv.length) { toast('库存为空，请先添加库存', 'err'); return; }
+        var html = '<form id="buyForm"><div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">' +
+          '<label>客户<select name="custId">' + customers.map(function (c) { return '<option value="' + c.id + '">' + esc(c.name) + '</option>'; }).join('') + '</select></label>' +
+          '<label>购买日期<input type="date" name="date" value="' + todayStr() + '"></label>' +
+          '<label class="full">购买黑胶专辑<select name="invId">' + inv.map(function (i) { return '<option value="' + i.id + '">' + esc(i.name) + ' — ' + esc(i.catalog || '') + '（库存 ' + (i.stockQty != null ? i.stockQty : 0) + '）</option>'; }).join('') + '</select></label>' +
+          '<label>购买数量<input type="number" min="1" name="qty" value="1"></label>' +
+          '</div><div class="form-btns"><button type="submit" class="btn btn-primary">保存并记录</button><button type="button" class="btn" id="cancelBtn">取消</button></div></form>';
+        formWrap.innerHTML = html; formWrap.classList.remove('hidden');
+        var form = formWrap.querySelector('#buyForm');
+        form.querySelector('#cancelBtn').onclick = function () { formWrap.classList.add('hidden'); };
+        form.onsubmit = function (e) {
+          e.preventDefault();
+          var f = e.target;
+          var custId = Number(f.custId.value), invId = Number(f.invId.value);
+          var qty = Number(f.qty.value) || 0, date = f.date.value;
+          if (qty < 1) { toast('购买数量至少 1', 'err'); return; }
+          var rec = inv.find(function (x) { return x.id === invId; });
+          if (!rec) { toast('库存记录不存在', 'err'); return; }
+          if (qty > (rec.stockQty != null ? rec.stockQty : 0)) { toast('库存不足（当前 ' + (rec.stockQty != null ? rec.stockQty : 0) + ' 张）', 'err'); return; }
+          var newQty = (rec.stockQty != null ? rec.stockQty : 0) - qty;
+          var newStatus = newQty <= 0 ? '已出售' : '在售';
+          VHDB.put('inventory', Object.assign({}, rec, { stockQty: newQty, status: newStatus })).then(function () {
+            return VHDB.get('crm', custId).then(function (cust) {
+              cust.purchases = cust.purchases || [];
+              cust.purchases.unshift({ date: date, albumName: rec.name, catalog: rec.catalog, qty: qty, ts: new Date().toISOString() });
+              return VHDB.put('crm', cust);
+            });
+          }).then(function () {
+            toast('已记录，库存扣减至 ' + newQty + ' 张', 'ok');
+            formWrap.classList.add('hidden');
+            refresh();
+          }).catch(function (er) { toast('保存失败：' + er.message, 'err'); });
+        };
+      });
+    }
+
+    function refresh() {
+      VHDB.getAll('crm').then(function (rows) {
+        if (!rows.length) { listWrap.innerHTML = '<div class="empty">暂无客户，点击「＋ 添加客户」开始。</div>'; return; }
+        listWrap.innerHTML = '<div class="list">' + rows.map(function (r) {
+          var buys = (r.purchases || []);
+          var buyHtml = buys.length ? '<div class="meta">购买记录：</div>' + buys.map(function (b) {
+            return '<div class="kv"><span class="kk">' + esc(b.date || '') + '</span><span class="vv">' + esc(b.albumName || '') + (b.catalog ? ' (' + esc(b.catalog) + ')' : '') + ' × ' + (b.qty || 1) + ' 张</span></div>';
+          }).join('') : '<div class="meta">暂无购买记录</div>';
+          return '<div class="item"><div class="body"><div class="row"><b>' + esc(r.name) + '</b>' +
+            (r.collectDir ? '<span class="tag">' + esc(r.collectDir) + '</span>' : '') + '</div>' +
+            (r.contact ? '<div class="meta">联系方式：' + esc(r.contact) + '</div>' : '') +
+            (r.favArtist ? '<div class="meta">喜欢歌手：' + esc(r.favArtist) + '</div>' : '') +
+            buyHtml + '</div>' +
+            '<div class="row-actions"><button class="btn btn-sm" data-edit="' + r.id + '">编辑</button>' +
+            '<button class="btn btn-sm btn-danger" data-del="' + r.id + '">删除</button></div></div>';
+        }).join('') + '</div>';
+        $$('[data-edit]', listWrap).forEach(function (b) {
+          b.onclick = function () { var it = rows.find(function (x) { return x.id == b.dataset.edit; }); editingId = it.id; buildCustForm(it); window.scrollTo({ top: 0, behavior: 'smooth' }); };
+        });
+        $$('[data-del]', listWrap).forEach(function (b) {
+          b.onclick = function () { if (confirm('确认删除该客户？')) VHDB.del('crm', Number(b.dataset.del)).then(function () { toast('已删除'); refresh(); }); };
+        });
+      });
+    }
+    node.querySelector('#addBtn').onclick = function () { editingId = null; buildCustForm({}); };
+    node.querySelector('#addBuy').onclick = buildBuyForm;
+    node._refresh = refresh;
+    return { node: node, refresh: refresh };
+  }
 
   /* ---------------- 视图路由 ---------------- */
   var viewCache = {};
@@ -1014,6 +1301,9 @@
     else if (id === 'datahub') mod = buildDataHub();
     else if (id === 'auth') mod = buildAuth();
     else if (id === 'websites') mod = buildWebsites();
+    else if (id === 'discogs') mod = buildDiscogs();
+    else if (id === 'inventory') mod = buildInventory();
+    else if (id === 'crm') mod = buildCrm();
     else if (id === 'plan') mod = buildPlan();
     else if (id === 'hot') mod = buildHot();
     else if (id === 'musicnews') mod = buildMusicNews();
