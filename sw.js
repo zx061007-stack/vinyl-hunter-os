@@ -10,10 +10,10 @@ var SHELL = [
   './index.html',
   './manifest.json',
   './icon.svg',
-  './assets/css/style.css',
-  './assets/js/db.js',
-  './assets/js/api.js',
-  './assets/js/app.js'
+  './assets/css/style.css?v=2',
+  './assets/js/db.js?v=2',
+  './assets/js/api.js?v=2',
+  './assets/js/app.js?v=2'
 ];
 
 self.addEventListener('install', function (e) {
