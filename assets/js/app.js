@@ -234,7 +234,7 @@
   //   用户填写：buyPrice（购入价）/presalePrice（预售价）
   // 输出：versionValue/overseasHot(+level/text)/chinaHot(+level/text)/collectValue/
   //       score/level/profit/margin/advice/reason
-  function analyzeVinyl(d) {
+  function analyzeVinyl(d, chinaHotWords) {
     var buy = Number(d.buyPrice) || 0;
     var sell = Number(d.presalePrice) || 0;
 
@@ -262,22 +262,50 @@
       if (vLimited) heat += 6; if (vColor) heat += 4;
       overseasHot = clamp(heat, 0, 100);
       var scarcity = numForSale === 0 ? '在售 0 张（极稀缺）' : ('在售约 ' + numForSale + ' 张');
-      overseasText = 'Discogs 收藏者关注(want) ' + (want || '-') + ' 人，拥有(have) ' + (have || '-') + ' 人；' + scarcity + '。' +
-        (overseasHot >= 75 ? '海外需求旺盛，版本抢手。' : overseasHot >= 60 ? '海外有一定需求。' : '海外需求一般。');
+      overseasText = '海外需求频率（Discogs 社区数据）：收藏者想买(want) ' + (want || '-') + ' 人，已拥有(have) ' + (have || '-') + ' 人，' + scarcity + '。' +
+        (overseasHot >= 75 ? '海外需求频率高，版本抢手。' : overseasHot >= 60 ? '海外有一定需求频率。' : '海外需求频率一般。');
     } else {
       var h = 60;
       if (vLimited) h += 20; if (vFirst) h += 12; if (vColor) h += 8;
       overseasHot = clamp(h, 0, 100);
       overseasText = '未获取到 Discogs 社区数据，' +
-        (overseasHot >= 75 ? '依据版本稀缺属性（限量/首版/彩胶）判断海外热度较高。' : '依据版本属性判断海外热度中等或一般。');
+        (overseasHot >= 75 ? '依据版本稀缺属性（限量/首版/彩胶）判断海外需求频率较高。' : '依据版本属性判断海外需求频率中等或一般。');
     }
     var overseasLevel = overseasHot >= 75 ? '高' : overseasHot >= 60 ? '中' : '低';
 
-    // 三、中国热度（本地估算，未接入中国社交平台数据源）
-    var chinaHot = clamp(Math.round(overseasHot * 0.82 + (vLimited ? 6 : 0) + (vFirst ? 4 : 0) - 6), 30, 95);
-    var chinaLevel = chinaHot >= 75 ? '高' : chinaHot >= 60 ? '中' : '低';
-    var chinaText = '（参考估算）基于海外热度与版本稀缺度推算，未接入中国社交平台数据源。' +
-      (chinaHot >= 75 ? '中国粉丝需求与收藏市场预期较高。' : chinaHot >= 60 ? '中国市场需求中等。' : '中国市场认知度与需求相对有限。');
+    // 三、中国热度（优先用微博/抖音热搜匹配活跃度；无数据则本地估算）
+    var estBase = clamp(Math.round(overseasHot * 0.82 + (vLimited ? 6 : 0) + (vFirst ? 4 : 0) - 6), 30, 95);
+    var hotWords = Array.isArray(chinaHotWords) ? chinaHotWords : [];
+    var chinaHot, chinaText, chinaSource;
+    if (hotWords.length) {
+      // 用歌手 / 厂牌（识别度高的实体）以及专辑名显著词去匹配热搜
+      var keywords = [d.artist, d.company].filter(function (k) { return k && String(k).trim().length >= 2; })
+        .map(function (k) { return String(k).trim(); })
+        .concat(String(d.name || '').split(/[\s\-–—/]+/).filter(function (w) { return w.length >= 3; }));
+      var hits = [];
+      hotWords.forEach(function (w) {
+        keywords.forEach(function (k) {
+          if (w && (w.indexOf(k) >= 0 || k.indexOf(w) >= 0) && hits.indexOf(k) < 0) hits.push(k);
+        });
+      });
+      var base = clamp(Math.round(overseasHot * 0.7 + (vLimited ? 6 : 0) + (vFirst ? 4 : 0) - 6), 30, 92);
+      if (hits.length) {
+        var bonus = hits.length >= 3 ? 35 : hits.length === 2 ? 28 : 18;
+        chinaHot = clamp(base + bonus, 30, 100);
+        chinaSource = '微博/抖音热搜命中';
+        chinaText = '基于微博/抖音热搜数据（共 ' + hotWords.length + ' 条）匹配到歌手/厂牌关键词：' + hits.join('、') +
+          '（' + hits.length + ' 处命中）。中国社交平台讨论热度高，粉丝需求与收藏市场预期强。';
+      } else {
+        chinaHot = clamp(base, 30, 95);
+        chinaSource = '微博/抖音热搜（未命中）';
+        chinaText = '已接入微博/抖音热搜数据（共 ' + hotWords.length + ' 条），未匹配到该艺人/厂牌，结合版本稀缺度与海外需求频率推算中国市场需求中等或有限。';
+      }
+    } else {
+      chinaHot = estBase;
+      chinaSource = '参考估算（未配置热搜代理）';
+      chinaText = '（参考估算）未配置中国热搜代理地址，基于海外需求频率与版本稀缺度推算。如需真实中国热度，请在系统设置填写热搜代理地址。' +
+        (chinaHot >= 75 ? '中国粉丝需求与收藏市场预期较高。' : chinaHot >= 60 ? '中国市场需求中等。' : '中国市场认知度与需求相对有限。');
+    }
 
     // 四、收藏价值
     var scarcityScore = (want && have) ? clamp(Math.round(want / Math.max(have, 1) * 40 + (numForSale < 20 ? 30 : 10)), 0, 100) : versionValue;
@@ -302,14 +330,14 @@
         (profit > 0 ? ('预计利润 ' + fmtMoney(profit) + ' 元（利润率 ' + margin.toFixed(1) + '%），') : '利润为负，'))
       : '尚未填写购入价格，';
     var versionDesc = (vLimited || vFirst || vColor) ? ('具收藏价值（' + [vLimited ? '限量' : null, vFirst ? '首版' : null, vColor ? '彩胶' : null].filter(Boolean).join('/') + '）') : '收藏价值一般';
-    var reason = '该黑胶海外收藏热度' + overseasLevel + '（' + (want ? ('want ' + want) : '版本属性推算') + '），' +
-      '中国粉丝需求' + chinaLevel + '（估算），版本' + versionDesc + '。' +
+    var reason = '该黑胶海外需求频率' + overseasLevel + '（' + (want ? ('Discogs want ' + want) : '版本属性推算') + '），' +
+      '中国热度' + chinaLevel + '（' + chinaSource + '），版本' + versionDesc + '。' +
       verdictWord + (profit > 0 ? '具有套利空间' : (buy > 0 ? '暂无明显套利空间' : '无法判断利润')) +
       '。综合评分 ' + score + '（' + level + '），建议' + advice + '。';
 
     d.versionValue = versionValue;
     d.overseasHot = overseasHot; d.overseasLevel = overseasLevel; d.overseasText = overseasText;
-    d.chinaHot = chinaHot; d.chinaLevel = chinaLevel; d.chinaText = chinaText;
+    d.chinaHot = chinaHot; d.chinaLevel = chinaLevel; d.chinaText = chinaText; d.chinaSource = chinaSource;
     d.collectValue = collectValue;
     d.score = score; d.level = level;
     d.profit = profit; d.margin = margin;
@@ -956,6 +984,7 @@
       '<label style="display:flex;flex-direction:column;gap:5px;margin-bottom:10px">主题<select name="theme"><option value="light">浅色（米白）</option><option value="dark">墨绿深色</option></select></label>' +
       '<label class="full" style="display:flex;flex-direction:column;gap:5px;margin-bottom:10px">Discogs Token（用于黑胶资料查询）<input name="discogsToken" placeholder="在 discogs.com/settings/developers 申请"></label>' +
       '<label class="full" style="display:flex;flex-direction:column;gap:5px;margin-bottom:10px">Discogs 代理地址（可选，解决浏览器跨域；Cloudflare Worker 等，留空走直连）<input name="discogsProxy" placeholder="https://你的worker.dev"></label>' +
+      '<label class="full" style="display:flex;flex-direction:column;gap:5px;margin-bottom:10px">中国热搜代理地址（可选，用于黑胶全分析的中国热度。部署 Cloudflare Worker 转发微博/抖音热搜，留空则中国热度使用本地估算）<input name="chinaHotProxy" placeholder="https://你的热搜worker.dev"></label>' +
       '<label class="full" style="display:flex;flex-direction:column;gap:5px;margin-bottom:10px">音乐资讯源（返回 JSON 数组或 {items:[...]} 的 URL）<input name="musicNewsSource"></label>' +
       '<label class="full" style="display:flex;flex-direction:column;gap:5px;margin-bottom:10px">抖音热点源（返回 {videos:[...],accounts:[...]} 的 URL）<input name="hotTopicSource"></label>' +
       '<label class="full" style="display:flex;flex-direction:column;gap:5px;margin-bottom:10px">热门音频源（返回数组或 {audios:[...]} 的 URL）<input name="audioSource"></label>' +
@@ -964,7 +993,7 @@
       '<div class="hint">未配置数据源时，各采集按钮会提示手动添加；手动录入始终是可靠主路径。汇率接口为免费公共服务，无需配置即可使用。</div></div>');
     VHDB.getConfig().then(function (cfg) {
       var f = node.querySelector('#cfgForm');
-      ['displayName', 'theme', 'discogsToken', 'discogsProxy', 'musicNewsSource', 'hotTopicSource', 'audioSource'].forEach(function (k) {
+      ['displayName', 'theme', 'discogsToken', 'discogsProxy', 'chinaHotProxy', 'musicNewsSource', 'hotTopicSource', 'audioSource'].forEach(function (k) {
         if (cfg[k] != null) f[k].value = cfg[k];
       });
       applyTheme(cfg.theme || 'light');
@@ -973,6 +1002,7 @@
       e.preventDefault(); var f = e.target;       var cfg = {
         displayName: f.displayName.value, theme: f.theme.value, discogsToken: f.discogsToken.value,
         discogsProxy: f.discogsProxy.value,
+        chinaHotProxy: f.chinaHotProxy.value,
         musicNewsSource: f.musicNewsSource.value, hotTopicSource: f.hotTopicSource.value,
         audioSource: f.audioSource.value
       };
@@ -1061,8 +1091,12 @@
       var baseHtml = '<div class="card"><h3>一、黑胶基础信息</h3><div class="kv-grid">' +
         info.map(function (x) { return kv(x[0], x[1] || '—'); }).join('') +
         kv('版本价值', r.versionValue + ' / 100') + '</div></div>';
-      var overseaHtml = '<div class="card"><h3>二、海外热度分析</h3>' + levelBadge(r.overseasHot) + '<p class="reason">' + esc(r.overseasText) + '</p></div>';
-      var chinaHtml = '<div class="card"><h3>三、中国市场热度分析</h3>' + levelBadge(r.chinaHot) + '<p class="reason">' + esc(r.chinaText) + '</p></div>';
+      var overseaHtml = '<div class="card"><h3>二、海外热度分析</h3>' + levelBadge(r.overseasHot) +
+        '<div class="meta">数据来源：Discogs 社区（海外收藏关注频率）</div>' +
+        '<p class="reason">' + esc(r.overseasText) + '</p></div>';
+      var chinaHtml = '<div class="card"><h3>三、中国市场热度分析</h3>' + levelBadge(r.chinaHot) +
+        '<div class="meta">数据来源：' + esc(r.chinaSource || '参考估算') + '</div>' +
+        '<p class="reason">' + esc(r.chinaText) + '</p></div>';
       var scoreHtml = '<div class="card score-card"><h3>四、黑胶价值评分</h3>' +
         '<div class="big-score">' + r.score + '<small>/100</small></div>' +
         '<span class="tag ' + (r.score >= 75 ? 'good' : r.score >= 60 ? 'warn' : 'bad') + '">' + esc(r.level) + '</span>' +
@@ -1110,18 +1144,32 @@
       if (!base.name && !base.artist && !base.catalog) { toast('请至少填写黑胶名称 / 歌手 / Catalog 之一', 'err'); return; }
       if (base.buyPrice === '' && base.presalePrice === '') { toast('请至少填写购入价格或预售价格', 'err'); return; }
       var rec = Object.assign({}, draftDiscogs || {}, base);
-      analyzeVinyl(rec);
-      rec.status = 'done';
-      rec.analyzedAt = new Date().toISOString();
-      if (!rec.createdAt) rec.createdAt = rec.analyzedAt;
-      if (editingId != null) rec.id = editingId;
-      var p = (editingId != null) ? VHDB.put('full_analysis', rec) : VHDB.add('full_analysis', rec);
-      p.then(function () {
+      var btn = e.target.querySelector('button[type="submit"]');
+      var old = btn ? btn.textContent : '';
+      if (btn) { btn.disabled = true; btn.textContent = '分析中…'; }
+      // 仅在配置了「中国热搜代理」时，于用户点击【开始分析】这一刻联网拉取热搜词（按钮触发，不自动）
+      VHDB.getConfig().then(function (cfg) {
+        if (!cfg.chinaHotProxy) return null;
+        return VHAPI.fetchChinaHotWords(cfg.chinaHotProxy).catch(function (err) {
+          toast('热搜数据获取失败，使用估算：' + err.message, 'err'); return null;
+        });
+      }).then(function (words) {
+        analyzeVinyl(rec, words);
+        rec.status = 'done';
+        rec.analyzedAt = new Date().toISOString();
+        if (!rec.createdAt) rec.createdAt = rec.analyzedAt;
+        if (editingId != null) rec.id = editingId;
+        return (editingId != null) ? VHDB.put('full_analysis', rec) : VHDB.add('full_analysis', rec);
+      }).then(function () {
         toast('分析完成并保存', 'ok');
         editingId = null; draftDiscogs = null;
         discogsInfo.classList.add('hidden'); discogsInfo.innerHTML = '';
         showResult(rec); refresh();
-      }).catch(function (err) { toast('保存失败：' + err.message, 'err'); });
+      }).catch(function (err) {
+        toast('分析失败：' + err.message, 'err');
+      }).then(function () {
+        if (btn) { btn.disabled = false; btn.textContent = old; }
+      });
     };
     node.querySelector('#newBtn').onclick = function () {
       editingId = null; draftDiscogs = null; form.reset();

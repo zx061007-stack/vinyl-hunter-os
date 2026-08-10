@@ -165,11 +165,31 @@
     });
   }
 
+  // 中国热度信号：经用户自部署的代理（Cloudflare Worker 等）拉取微博/抖音热搜词。
+  // 代理需返回标准化 { words: ["词1","词2",...] }（也兼容微博 {data:{realtime:[{word}]}}、
+  // 抖音 {word_list:[{word}]} 等格式）。代理负责解决浏览器跨域(CORS)。
+  // 仅在用户点击【开始分析】且配置了代理地址时才调用——按钮触发，不自动联网。
+  function fetchChinaHotWords(proxyUrl) {
+    return fetchJson(proxyUrl).then(function (data) {
+      var words = [];
+      function push(x) { var s = x && (x.word || x.title || x.name || x); if (s && String(s).trim()) words.push(String(s).trim()); }
+      if (data && Array.isArray(data.words)) data.words.forEach(push);
+      else if (data && data.data && Array.isArray(data.data.realtime)) data.data.realtime.forEach(push);
+      else if (data && Array.isArray(data.word_list)) data.word_list.forEach(push);
+      else if (data && Array.isArray(data.trending)) data.trending.forEach(push);
+      else if (Array.isArray(data)) data.forEach(push);
+      var seen = {}, uniq = [];
+      words.forEach(function (w) { if (!seen[w]) { seen[w] = 1; uniq.push(w); } });
+      return uniq.slice(0, 200);
+    });
+  }
+
   global.VHAPI = {
     fetchExchangeRates: fetchExchangeRates,
     fetchDiscogs: fetchDiscogs,
     fetchDiscogsRelease: fetchDiscogsRelease,
     fetchJson: fetchJson,
-    fetchMusicBrainzNews: fetchMusicBrainzNews
+    fetchMusicBrainzNews: fetchMusicBrainzNews,
+    fetchChinaHotWords: fetchChinaHotWords
   };
 })(window);
