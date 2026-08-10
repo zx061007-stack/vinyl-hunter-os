@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
+  <defs>
+    <radialGradient id="bg" cx="50%" cy="50%" r="70%">
+      <stop offset="0%" stop-color="#f7f1e6"/>
+      <stop offset="100%" stop-color="#ece4d4"/>
+    </radialGradient>
+  </defs>
+  <rect width="512" height="512" rx="96" fill="url(#bg)"/>
+  <circle cx="256" cy="248" r="150" fill="#2b4a3e"/>
+  <circle cx="256" cy="248" r="150" fill="none" stroke="#1c2925" stroke-width="2"/>
+  <circle cx="256" cy="248" r="120" fill="none" stroke="#3a4d44" stroke-width="2"/>
+  <circle cx="256" cy="248" r="92" fill="none" stroke="#3a4d44" stroke-width="2"/>
+  <circle cx="256" cy="248" r="58" fill="#cf7a33"/>
+  <circle cx="256" cy="248" r="14" fill="#f7f1e6"/>
+  <text x="256" y="470" font-family="PingFang SC, Microsoft YaHei, sans-serif" font-size="40" font-weight="700" fill="#2b4a3e" text-anchor="middle">VINYL</text>
+</svg>

@@ -1,0 +1,20 @@
+{
+  "name": "Vinyl Hunter OS · 黑胶信息差商业操作系统",
+  "short_name": "Vinyl Hunter OS",
+  "description": "全球黑胶信息获取、价格监控、Discogs查询、真假鉴定、选品评分、利润与套利分析、采购库存与客户管理的个人商业工作台。",
+  "lang": "zh-CN",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait-primary",
+  "background_color": "#f4eee2",
+  "theme_color": "#2b4a3e",
+  "icons": [
+    {
+      "src": "icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

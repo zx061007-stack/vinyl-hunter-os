@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="light">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>Vinyl Hunter OS · 黑胶信息差商业操作系统</title>
+  <meta name="description" content="全球黑胶信息差个人商业操作系统：价格监控、Discogs查询、真假鉴定、选品评分、利润与套利分析、采购库存与客户管理。" />
+  <meta name="theme-color" content="#2b4a3e" />
+  <link rel="manifest" href="manifest.json" />
+  <link rel="icon" href="icon.svg" type="image/svg+xml" />
+  <link rel="apple-touch-icon" href="icon.svg" />
+  <link rel="stylesheet" href="assets/css/style.css" />
+</head>
+<body>
+  <div id="app">
+    <aside id="sidebar">
+      <div class="brand">
+        <span class="logo">◉</span>
+        <div class="brand-text">
+          <div class="brand-name">Vinyl Hunter OS</div>
+          <div class="brand-sub">黑胶信息差商业操作系统</div>
+        </div>
+      </div>
+      <nav id="nav"></nav>
+      <div class="side-foot">
+        <span class="dot"></span> 本地数据 · 永久保存
+      </div>
+    </aside>
+
+    <div id="main">
+      <header id="topbar">
+        <button id="menuBtn" class="icon-btn" aria-label="菜单">☰</button>
+        <div id="viewTitle">首页驾驶舱</div>
+        <div id="clock"></div>
+      </header>
+      <section id="content"></section>
+    </div>
+
+    <div id="scrim"></div>
+  </div>
+
+  <div id="toast"></div>
+
+  <script src="assets/js/db.js"></script>
+  <script src="assets/js/api.js"></script>
+  <script src="assets/js/app.js"></script>
+</body>
+</html>
