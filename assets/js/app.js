@@ -56,8 +56,7 @@
     { id: 'websites', label: '🔗唱片网址', icon: '🔗' },
     { id: 'discogs', label: 'Discogs黑胶数据库', icon: '💿' },
     { id: 'auth', label: '黑胶真假鉴定助手', icon: '🔍' },
-    { id: 'selection', label: '黑胶选品评分', icon: '⭐' },
-    { id: 'arbitrage', label: '黑胶套利分析', icon: '💱' },
+    { id: 'analysis', label: '黑胶全分析', icon: '📊' },
     { id: 'profit', label: '黑胶利润计算器', icon: '🧮' },
     { id: 'inventory', label: '黑胶库存管理', icon: '📦' },
     { id: 'hot', label: '每日热点', icon: '🔥' },
@@ -229,30 +228,93 @@
 
   /* ---------------- 派生计算（评分 / 利润 / 套利） ---------------- */
   // 选品评分：热度由系统自动估算（无需用户输入），利润 + 热度 + 收藏价值
-  function deriveSelection(d) {
-    var buy = Number(d.buyPrice) || 0, sell = Number(d.sellPrice) || 0;
+  // 黑胶全分析：综合评分引擎（本地确定性算法，不消耗 Token）
+  // 输入 d 需含：name/artist/catalog/version/versionInfo/year/company/country
+  //   可选 Discogs 社区数据：want/have/numForSale
+  //   用户填写：buyPrice（购入价）/presalePrice（预售价）
+  // 输出：versionValue/overseasHot(+level/text)/chinaHot(+level/text)/collectValue/
+  //       score/level/profit/margin/advice/reason
+  function analyzeVinyl(d) {
+    var buy = Number(d.buyPrice) || 0;
+    var sell = Number(d.presalePrice) || 0;
+
+    // 一、版本价值（基于版本描述关键词）
+    var vp = ((d.version || '') + ' ' + (d.versionInfo || '')).toLowerCase();
+    var vLimited = /limited|限量|numbered/.test(vp);
+    var vFirst = /first|首版|original/.test(vp);
+    var vColor = /colou?r|picture disc|彩胶/.test(vp);
+    var vWeight = (/(\d{3})\s?g/.exec(vp) || [])[0];
+    var versionValue = 55;
+    if (vLimited) versionValue += 20;
+    if (vFirst) versionValue += 18;
+    if (vColor) versionValue += 12;
+    if (vWeight && parseInt(vWeight, 10) >= 180) versionValue += 8;
+    versionValue = clamp(versionValue, 0, 100);
+
+    // 二、海外热度（有 Discogs 社区数据则数据驱动，否则按版本属性估算）
+    var want = Number(d.want) || 0, have = Number(d.have) || 0, numForSale = Number(d.numForSale) || 0;
+    var overseasHot, overseasText;
+    if (want || have || numForSale) {
+      var heat = 45;
+      if (want >= 2000) heat = 95; else if (want >= 1000) heat = 85; else if (want >= 500) heat = 76;
+      else if (want >= 200) heat = 66; else if (want >= 80) heat = 56; else heat = 48;
+      if (numForSale === 0) heat += 12; else if (numForSale < 10) heat += 9; else if (numForSale < 30) heat += 4;
+      if (vLimited) heat += 6; if (vColor) heat += 4;
+      overseasHot = clamp(heat, 0, 100);
+      var scarcity = numForSale === 0 ? '在售 0 张（极稀缺）' : ('在售约 ' + numForSale + ' 张');
+      overseasText = 'Discogs 收藏者关注(want) ' + (want || '-') + ' 人，拥有(have) ' + (have || '-') + ' 人；' + scarcity + '。' +
+        (overseasHot >= 75 ? '海外需求旺盛，版本抢手。' : overseasHot >= 60 ? '海外有一定需求。' : '海外需求一般。');
+    } else {
+      var h = 60;
+      if (vLimited) h += 20; if (vFirst) h += 12; if (vColor) h += 8;
+      overseasHot = clamp(h, 0, 100);
+      overseasText = '未获取到 Discogs 社区数据，' +
+        (overseasHot >= 75 ? '依据版本稀缺属性（限量/首版/彩胶）判断海外热度较高。' : '依据版本属性判断海外热度中等或一般。');
+    }
+    var overseasLevel = overseasHot >= 75 ? '高' : overseasHot >= 60 ? '中' : '低';
+
+    // 三、中国热度（本地估算，未接入中国社交平台数据源）
+    var chinaHot = clamp(Math.round(overseasHot * 0.82 + (vLimited ? 6 : 0) + (vFirst ? 4 : 0) - 6), 30, 95);
+    var chinaLevel = chinaHot >= 75 ? '高' : chinaHot >= 60 ? '中' : '低';
+    var chinaText = '（参考估算）基于海外热度与版本稀缺度推算，未接入中国社交平台数据源。' +
+      (chinaHot >= 75 ? '中国粉丝需求与收藏市场预期较高。' : chinaHot >= 60 ? '中国市场需求中等。' : '中国市场认知度与需求相对有限。');
+
+    // 四、收藏价值
+    var scarcityScore = (want && have) ? clamp(Math.round(want / Math.max(have, 1) * 40 + (numForSale < 20 ? 30 : 10)), 0, 100) : versionValue;
+    var collectValue = clamp(Math.round(versionValue * 0.6 + scarcityScore * 0.4), 0, 100);
+
+    // 五、价值评分（0-100）
+    var score = Math.round(0.35 * overseasHot + 0.25 * chinaHot + 0.25 * versionValue + 0.15 * collectValue);
+    var level = score >= 90 ? '强烈推荐' : score >= 75 ? '推荐关注' : score >= 60 ? '谨慎考虑' : '不建议采购';
+
+    // 六、利润分析
     var profit = sell - buy;
-    var profitPct = sell > 0 ? profit / sell * 100 : 0;
-    var profitScore = clamp(profitPct, 0, 100) / 100 * 40;        // 利润权重 40
-    var v = (d.version || '').toLowerCase();
-    var heat = 55;
-    if (/限量|limited/.test(v)) heat += 20;
-    if (/首版|first/.test(v)) heat += 15;
-    if (/彩胶|color|picture/.test(v)) heat += 10;
-    heat = Math.min(100, heat);
-    var overseasHot = heat;
-    var chinaHot = Math.max(40, heat - 12);
-    var heatScore = (overseasHot + chinaHot) / 2 / 100 * 40;       // 热度权重 40
-    var cv = 60;
-    if (/限量|limited/.test(v)) cv += 20;
-    if (/首版|first/.test(v)) cv += 20;
-    cv = Math.min(100, cv);
-    var collectScore = cv / 100 * 20;                              // 收藏价值权重 20
-    var score = Math.round(profitScore + heatScore + collectScore);
-    var advice = score >= 80 ? '推荐购买' : score >= 60 ? '观察购买' : '不建议购买';
-    d.overseasHot = overseasHot; d.chinaHot = chinaHot; d.collectValue = cv;
-    d.score = score; d.advice = advice; d.profit = profit;
-    d._summary = '评分 ' + score + ' · ' + advice + ' · 利润 ' + fmtMoney(profit) + ' · 海外热度 ' + overseasHot;
+    var margin = buy > 0 ? (profit / buy * 100) : 0;
+
+    // 七、最终购买建议
+    var advice;
+    if (score >= 75 && profit > 0) advice = '推荐购买';
+    else if (score >= 60 && profit >= 0) advice = '谨慎购买';
+    else advice = '不建议购买';
+
+    var verdictWord = buy > 0
+      ? ('当前采购成本 ' + fmtMoney(buy) + ' 元，预计售价 ' + fmtMoney(sell) + ' 元，' +
+        (profit > 0 ? ('预计利润 ' + fmtMoney(profit) + ' 元（利润率 ' + margin.toFixed(1) + '%），') : '利润为负，'))
+      : '尚未填写购入价格，';
+    var versionDesc = (vLimited || vFirst || vColor) ? ('具收藏价值（' + [vLimited ? '限量' : null, vFirst ? '首版' : null, vColor ? '彩胶' : null].filter(Boolean).join('/') + '）') : '收藏价值一般';
+    var reason = '该黑胶海外收藏热度' + overseasLevel + '（' + (want ? ('want ' + want) : '版本属性推算') + '），' +
+      '中国粉丝需求' + chinaLevel + '（估算），版本' + versionDesc + '。' +
+      verdictWord + (profit > 0 ? '具有套利空间' : (buy > 0 ? '暂无明显套利空间' : '无法判断利润')) +
+      '。综合评分 ' + score + '（' + level + '），建议' + advice + '。';
+
+    d.versionValue = versionValue;
+    d.overseasHot = overseasHot; d.overseasLevel = overseasLevel; d.overseasText = overseasText;
+    d.chinaHot = chinaHot; d.chinaLevel = chinaLevel; d.chinaText = chinaText;
+    d.collectValue = collectValue;
+    d.score = score; d.level = level;
+    d.profit = profit; d.margin = margin;
+    d.advice = advice; d.reason = reason;
+    return d;
   }
   // 利润计算器：显式拆分 国际邮费 / 国内邮费 / 打包费 / 赠品费 / 其他费用
   function deriveProfit(d) {
@@ -264,32 +326,9 @@
     d.cost = cost; d.profit = profit; d.margin = margin; d.advice = advice;
     d._summary = '成本 ' + fmtMoney(cost) + ' · 利润 ' + fmtMoney(profit) + ' · 利润率 ' + margin.toFixed(1) + '% · ' + advice;
   }
-  // 套利分析（精简）：名称 / Catalog / Discogs价格 / 购买价格 → 套利评分
-  function deriveArbitrage(d) {
-    var discogs = Number(d.discogsPrice) || 0, buy = Number(d.buyPrice) || 0;
-    if (!discogs || !buy) { d._summary = '请填写 Discogs 价格与购买价格'; return; }
-    var spread = discogs - buy;
-    var marginPct = buy > 0 ? spread / buy * 100 : 0;
-    var score = Math.round(clamp(marginPct, 0, 100));            // 套利评分 0-100
-    var risk = marginPct >= 40 ? '低风险' : marginPct >= 15 ? '中风险' : '高风险';
-    var advice = score >= 60 ? '值得套利' : score >= 30 ? '可小批量' : '暂不套利';
-    d.spread = spread; d.marginPct = marginPct; d.score = score; d.risk = risk; d.advice = advice;
-    d._summary = '套利评分 ' + score + ' · 空间 ' + fmtMoney(spread) + ' (' + marginPct.toFixed(1) + '%) · ' + risk + ' · ' + advice;
-  }
 
   /* ---------------- 记录模块配置（精简后保留） ---------------- */
   var RECORD_CONFIGS = {
-    selection: {
-      title: '黑胶选品评分', store: 'selection_scores', derive: deriveSelection,
-      fields: [
-        { k: 'name', l: '黑胶名称', t: 'text' },
-        { k: 'artist', l: '歌手', t: 'text' },
-        { k: 'buyPrice', l: '采购价格', t: 'number' },
-        { k: 'sellPrice', l: '预计售价', t: 'number' },
-        { k: 'version', l: '版本', t: 'text' }
-      ],
-      cols: ['name', 'artist', 'buyPrice', 'sellPrice']
-    },
     profit: {
       title: '黑胶利润计算器', store: 'profit_calcs', derive: deriveProfit,
       fields: [
@@ -302,16 +341,6 @@
         { k: 'sellPrice', l: '预计售价', t: 'number' }
       ],
       cols: ['buyPrice', 'sellPrice']
-    },
-    arbitrage: {
-      title: '黑胶套利分析', store: 'arbitrage', derive: deriveArbitrage,
-      fields: [
-        { k: 'name', l: '黑胶名称', t: 'text' },
-        { k: 'catalog', l: 'Catalog Number', t: 'text' },
-        { k: 'discogsPrice', l: 'Discogs价格', t: 'number' },
-        { k: 'buyPrice', l: '购买价格', t: 'number' }
-      ],
-      cols: ['name', 'catalog', 'discogsPrice', 'buyPrice']
     },
     expense: {
       title: '消费记账', store: 'expenses',
@@ -336,8 +365,7 @@
       { id: 'websites', icon: '🔗', label: '唱片网址' },
       { id: 'discogs', icon: '💿', label: 'Discogs 资料' },
       { id: 'auth', icon: '🔍', label: '真假鉴定' },
-      { id: 'selection', icon: '⭐', label: '选品评分' },
-      { id: 'arbitrage', icon: '💱', label: '套利分析' },
+      { id: 'analysis', icon: '📊', label: '黑胶全分析' },
       { id: 'profit', icon: '🧮', label: '利润计算' },
       { id: 'inventory', icon: '📦', label: '库存管理' },
       { id: 'plan', icon: '✅', label: '每日计划' }
@@ -349,7 +377,7 @@
       '<div class="dash-grid" id="dashGrid"></div>' +
       '<div class="dash-row">' +
       '  <div class="card"><h3>最近鉴定记录</h3><div id="dashAuth"></div></div>' +
-      '  <div class="card"><h3>最近评分记录</h3><div id="dashSel"></div></div>' +
+      '  <div class="card"><h3>最近全分析</h3><div id="dashFull"></div></div>' +
       '  <div class="card"><h3>最新音乐资讯</h3><div id="dashMusic"></div></div>' +
       '</div>' +
       '<div class="section-title">快捷入口</div>' +
@@ -366,10 +394,10 @@
         VHDB.getAll('inventory'),
         VHDB.getAll('expenses'),
         VHDB.getAll('auth_records'),
-        VHDB.getAll('selection_scores'),
+        VHDB.getAll('full_analysis'),
         VHDB.get('music_news', todayStr())
       ]).then(function (r) {
-        var plans = r[0], inv = r[1], exps = r[2], auth = r[3], sel = r[4], music = r[5];
+        var plans = r[0], inv = r[1], exps = r[2], auth = r[3], full = r[4], music = r[5];
         var planTotal = plans && plans.tasks ? plans.tasks.length : 0;
         var planDone = plans && plans.tasks ? plans.tasks.filter(function (t) { return t.done; }).length : 0;
         var rate = planTotal ? Math.round(planDone / planTotal * 100) : 0;
@@ -394,12 +422,12 @@
             '<div class="meta">' + esc([lastAuth.catalog, lastAuth.country, lastAuth.year].filter(Boolean).join(' · ')) + '</div></div></div>'
           : '<div class="empty" style="padding:10px 0">暂无鉴定记录</div>';
 
-        var lastSel = sel.slice().sort(function (a, b) { return (b.createdAt || '').localeCompare(a.createdAt || ''); })[0];
-        $('#dashSel', node).innerHTML = lastSel
-          ? '<div class="item" style="padding:10px 0"><div class="body"><b>' + esc(lastSel.name || '评分记录') + '</b> ' +
-            '<span class="tag ' + (lastSel.score >= 80 ? 'good' : lastSel.score >= 60 ? 'warn' : 'bad') + '">评分 ' + lastSel.score + ' · ' + esc(lastSel.advice || '') + '</span>' +
-            '<div class="meta">海外热度 ' + (lastSel.overseasHot || '-') + ' · 中国热度 ' + (lastSel.chinaHot || '-') + '</div></div></div>'
-          : '<div class="empty" style="padding:10px 0">暂无评分记录</div>';
+        var lastFull = full.slice().sort(function (a, b) { return (b.analyzedAt || b.createdAt || '').localeCompare(a.analyzedAt || a.createdAt || ''); })[0];
+        $('#dashFull', node).innerHTML = lastFull
+          ? '<div class="item" style="padding:10px 0"><div class="body"><b>' + esc(lastFull.name || '分析记录') + '</b> ' +
+            '<span class="tag ' + (lastFull.score >= 75 ? 'good' : lastFull.score >= 60 ? 'warn' : 'bad') + '">评分 ' + lastFull.score + ' · ' + esc(lastFull.advice || '') + '</span>' +
+            '<div class="meta">海外热度 ' + (lastFull.overseasLevel || lastFull.overseasHot || '-') + ' · 中国热度 ' + (lastFull.chinaLevel || lastFull.chinaHot || '-') + '</div></div></div>'
+          : '<div class="empty" style="padding:10px 0">暂无分析记录</div>';
 
         var items = music && music.items ? music.items : [];
         var lastMusic = items[0];
@@ -956,6 +984,159 @@
   function applyTheme(t) { document.documentElement.setAttribute('data-theme', t || 'light'); }
 
   /* ---------------- Discogs 黑胶数据库（查询中心，联动库存） ---------------- */
+  /* ---------------- 黑胶全分析（合并选品评分 + 套利分析） ---------------- */
+  function buildAnalysis() {
+    var node = elFrom('<div class="module">' +
+      '<div class="mod-head"><h2>📊 黑胶全分析</h2>' +
+      '<div class="mod-actions"><button class="btn btn-primary" id="newBtn">＋ 新建分析</button></div></div>' +
+      '<div class="hint">采购决策核心工具，已合并「选品评分 + 套利分析」。所有分析必须点击【开始分析】才会计算，<b>不自动联网、不消耗 Token</b>。结果永久保存在本地，刷新 / 关闭不丢失。</div>' +
+      '<div class="section-title">待分析列表</div>' +
+      '<div id="pendingList"><div class="empty">暂无待分析项。在 Discogs 查询后点【进入黑胶全分析】可自动生成。</div></div>' +
+      '<div class="section-title">分析表单</div>' +
+      '<div class="form-wrap" id="formWrap"><form id="aForm">' +
+      '<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">' +
+      '<label>黑胶名称<input type="text" name="name" placeholder="如 Nevermind"></label>' +
+      '<label>歌手名称<input type="text" name="artist" placeholder="如 Nirvana"></label>' +
+      '<label>Catalog Number<input type="text" name="catalog" placeholder="如 ABCD-123"></label>' +
+      '<label>购入价格（采购成本 元）<input type="number" step="any" name="buyPrice" placeholder="0"></label>' +
+      '<label class="full">预售价格（预计售价 元）<input type="number" step="any" name="presalePrice" placeholder="0"></label>' +
+      '</div>' +
+      '<div id="discogsInfo" class="discogs-info hidden"></div>' +
+      '<div class="form-btns"><button type="submit" class="btn btn-primary">🚀 开始分析</button>' +
+      '<button type="button" class="btn" id="clearBtn">清空</button></div>' +
+      '</form></div>' +
+      '<div class="section-title">分析结果</div>' +
+      '<div id="result"><div class="empty">填写信息后点击「开始分析」。</div></div>' +
+      '<div class="section-title">历史分析记录</div>' +
+      '<div id="histList"><div class="empty">暂无记录。</div></div></div>');
+
+    var pendingList = node.querySelector('#pendingList');
+    var formWrap = node.querySelector('#formWrap');
+    var form = node.querySelector('#aForm');
+    var discogsInfo = node.querySelector('#discogsInfo');
+    var resultEl = node.querySelector('#result');
+    var histList = node.querySelector('#histList');
+    var editingId = null;
+    var draftDiscogs = null;
+
+    function kv(k, v) { return '<div class="kv"><span class="kk">' + esc(k) + '</span><span class="vv">' + esc(v) + '</span></div>'; }
+    function fmtPct(v) { return (v > 0 ? '+' : '') + v.toFixed(1) + '%'; }
+    function levelBadge(v) {
+      var cls = v >= 75 ? 'good' : v >= 60 ? 'warn' : 'bad';
+      var t = v >= 75 ? '高' : v >= 60 ? '中' : '低';
+      return '<span class="tag ' + cls + '">' + t + ' (' + v + ')</span>';
+    }
+    function renderDiscogsInfo(r) {
+      var rows = [['发行版本', r.version], ['发行年份', r.year], ['发行公司', r.company], ['发行国家', r.country], ['版本信息', r.versionInfo]].filter(function (x) { return x[1]; });
+      return '<div class="discogs-info-box"><b>已带入 Discogs 资料</b>' +
+        (r.cover ? '<img src="' + esc(r.cover) + '" style="width:48px;height:48px;object-fit:cover;border-radius:6px;float:right">' : '') +
+        '<div class="kv-grid">' + rows.map(function (x) { return kv(x[0], x[1]); }).join('') + '</div></div>';
+    }
+    function renderPending(rows) {
+      var pend = rows.filter(function (r) { return r.status === 'pending'; });
+      if (!pend.length) { pendingList.innerHTML = '<div class="empty">暂无待分析项。在 Discogs 查询后点【进入黑胶全分析】可自动生成。</div>'; return; }
+      pendingList.innerHTML = '<div class="list">' + pend.map(function (r) {
+        return '<div class="item"><div class="body" style="display:flex;gap:10px;align-items:center">' +
+          (r.cover ? '<img src="' + esc(r.cover) + '" style="width:42px;height:42px;object-fit:cover;border-radius:6px">' : '<div class="noimg">💿</div>') +
+          '<div style="flex:1"><b>' + esc(r.name || '未命名') + '</b> — ' + esc(r.artist || '') + ' <span class="tag">' + esc(r.catalog || '') + '</span>' +
+          '<div class="meta">' + esc([r.version, r.year, r.country].filter(Boolean).join(' · ')) + '</div>' +
+          '<div class="meta">创建：' + (r.createdAt || '').slice(0, 16).replace('T', ' ') + ' · 待分析</div></div>' +
+          '<button class="btn btn-sm btn-primary" data-an="' + r.id + '">开始分析</button></div></div>';
+      }).join('') + '</div>';
+      $$('[data-an]', pendingList).forEach(function (b) { b.onclick = function () { loadPending(Number(b.dataset.an), rows); }; });
+    }
+    function loadPending(id, rows) {
+      var r = rows.find(function (x) { return x.id === id; });
+      if (!r) return;
+      editingId = id; draftDiscogs = r;
+      form.elements['name'].value = r.name || ''; form.elements['artist'].value = r.artist || ''; form.elements['catalog'].value = r.catalog || '';
+      form.elements['buyPrice'].value = ''; form.elements['presalePrice'].value = '';
+      discogsInfo.innerHTML = renderDiscogsInfo(r); discogsInfo.classList.remove('hidden');
+      resultEl.innerHTML = '<div class="empty">已载入 Discogs 资料，请填写购入价格与预售价格，然后点击「开始分析」。</div>';
+      formWrap.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      setTimeout(function () { try { form.elements['buyPrice'].focus(); } catch (e) {} }, 300);
+    }
+    function showResult(r) {
+      var info = [['黑胶名称', r.name], ['歌手', r.artist], ['Catalog Number', r.catalog], ['发行版本', r.version], ['发行年份', r.year], ['发行公司', r.company], ['发行国家', r.country]];
+      var baseHtml = '<div class="card"><h3>一、黑胶基础信息</h3><div class="kv-grid">' +
+        info.map(function (x) { return kv(x[0], x[1] || '—'); }).join('') +
+        kv('版本价值', r.versionValue + ' / 100') + '</div></div>';
+      var overseaHtml = '<div class="card"><h3>二、海外热度分析</h3>' + levelBadge(r.overseasHot) + '<p class="reason">' + esc(r.overseasText) + '</p></div>';
+      var chinaHtml = '<div class="card"><h3>三、中国市场热度分析</h3>' + levelBadge(r.chinaHot) + '<p class="reason">' + esc(r.chinaText) + '</p></div>';
+      var scoreHtml = '<div class="card score-card"><h3>四、黑胶价值评分</h3>' +
+        '<div class="big-score">' + r.score + '<small>/100</small></div>' +
+        '<span class="tag ' + (r.score >= 75 ? 'good' : r.score >= 60 ? 'warn' : 'bad') + '">' + esc(r.level) + '</span>' +
+        '<div class="meta">收藏价值 ' + r.collectValue + ' / 100</div></div>';
+      var profitHtml = '<div class="card"><h3>五、利润分析</h3><div class="kv-grid">' +
+        kv('采购成本', fmtMoney(r.buyPrice != null ? r.buyPrice : 0)) +
+        kv('预计售价', fmtMoney(r.presalePrice != null ? r.presalePrice : 0)) +
+        kv('预计利润', fmtMoney(r.profit)) + kv('利润率', fmtPct(r.margin)) + '</div></div>';
+      var adviceCls = r.advice === '推荐购买' ? 'good' : r.advice === '谨慎购买' ? 'warn' : 'bad';
+      var adviceHtml = '<div class="card"><h3>六、最终购买建议</h3>' +
+        '<span class="tag ' + adviceCls + ' big-tag">' + esc(r.advice) + '</span>' +
+        '<p class="reason">' + esc(r.reason) + '</p></div>';
+      resultEl.innerHTML = baseHtml + overseaHtml + chinaHtml + scoreHtml + profitHtml + adviceHtml;
+      resultEl.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+    function renderHist(rows) {
+      var done = rows.filter(function (r) { return r.status === 'done'; })
+        .sort(function (a, b) { return (b.analyzedAt || '').localeCompare(a.analyzedAt || ''); });
+      if (!done.length) { histList.innerHTML = '<div class="empty">暂无记录。</div>'; return; }
+      histList.innerHTML = '<div class="list">' + done.map(function (r) {
+        return '<div class="item"><div class="body" style="display:flex;gap:10px;align-items:center">' +
+          (r.cover ? '<img src="' + esc(r.cover) + '" style="width:40px;height:40px;object-fit:cover;border-radius:6px">' : '<div class="noimg">💿</div>') +
+          '<div style="flex:1"><b>' + esc(r.name || '未命名') + '</b> — ' + esc(r.artist || '') + ' <span class="tag">' + esc(r.catalog || '') + '</span>' +
+          '<div class="meta">评分 ' + (r.score || '-') + ' · ' + esc(r.advice || '') + ' · 利润 ' + fmtMoney(r.profit) + ' · ' + (r.analyzedAt || '').slice(0, 10) + '</div></div>' +
+          '<button class="btn btn-sm" data-view="' + r.id + '">查看</button>' +
+          '<button class="btn btn-sm btn-danger" data-del="' + r.id + '">删除</button></div></div>';
+      }).join('') + '</div>';
+      $$('[data-view]', histList).forEach(function (b) {
+        b.onclick = function () { var rec = done.find(function (x) { return x.id === Number(b.dataset.view); }); if (rec) showResult(rec); };
+      });
+      $$('[data-del]', histList).forEach(function (b) {
+        b.onclick = function () { VHDB.del('full_analysis', Number(b.dataset.del)).then(refresh).catch(function (e) { toast('删除失败：' + e.message, 'err'); }); };
+      });
+    }
+    function refresh() {
+      VHDB.getAll('full_analysis').then(function (rows) { renderPending(rows); renderHist(rows); });
+    }
+    form.onsubmit = function (e) {
+      e.preventDefault();
+      var base = {
+        name: form.elements['name'].value.trim(), artist: form.elements['artist'].value.trim(), catalog: form.elements['catalog'].value.trim(),
+        buyPrice: form.elements['buyPrice'].value === '' ? '' : Number(form.elements['buyPrice'].value),
+        presalePrice: form.elements['presalePrice'].value === '' ? '' : Number(form.elements['presalePrice'].value)
+      };
+      if (!base.name && !base.artist && !base.catalog) { toast('请至少填写黑胶名称 / 歌手 / Catalog 之一', 'err'); return; }
+      if (base.buyPrice === '' && base.presalePrice === '') { toast('请至少填写购入价格或预售价格', 'err'); return; }
+      var rec = Object.assign({}, draftDiscogs || {}, base);
+      analyzeVinyl(rec);
+      rec.status = 'done';
+      rec.analyzedAt = new Date().toISOString();
+      if (!rec.createdAt) rec.createdAt = rec.analyzedAt;
+      if (editingId != null) rec.id = editingId;
+      var p = (editingId != null) ? VHDB.put('full_analysis', rec) : VHDB.add('full_analysis', rec);
+      p.then(function () {
+        toast('分析完成并保存', 'ok');
+        editingId = null; draftDiscogs = null;
+        discogsInfo.classList.add('hidden'); discogsInfo.innerHTML = '';
+        showResult(rec); refresh();
+      }).catch(function (err) { toast('保存失败：' + err.message, 'err'); });
+    };
+    node.querySelector('#newBtn').onclick = function () {
+      editingId = null; draftDiscogs = null; form.reset();
+      discogsInfo.classList.add('hidden'); discogsInfo.innerHTML = '';
+      resultEl.innerHTML = '<div class="empty">填写信息后点击「开始分析」。</div>';
+      formWrap.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    };
+    node.querySelector('#clearBtn').onclick = function () {
+      editingId = null; draftDiscogs = null; form.reset();
+      discogsInfo.classList.add('hidden'); discogsInfo.innerHTML = '';
+    };
+    node._refresh = refresh; refresh();
+    return { node: node, refresh: refresh };
+  }
+
   function buildDiscogs() {
     var node = elFrom('<div class="module"><div class="mod-head"><h2>💿 Discogs 黑胶数据库</h2>' +
       '<div class="mod-actions"><button class="btn btn-collect" id="qBtn">🔍 查询专辑信息</button></div></div>' +
@@ -997,6 +1178,7 @@
               '<div class="meta">' + esc([it.year, it.country, it.catalog].filter(Boolean).join(' · ')) + '</div>' +
               '<div class="meta">' + esc(it.version || '') + '</div></div>' +
               '<div class="row-actions"><button class="btn btn-sm" data-detail="' + i + '">查看详情</button>' +
+              '<button class="btn btn-sm" data-ana="' + i + '">进入全分析</button>' +
               '<button class="btn btn-sm btn-primary" data-save="' + i + '">保存到库存</button></div></div></div>';
           }).join('') + '</div>';
           $$('[data-detail]', resultsEl).forEach(function (btn) {
@@ -1004,6 +1186,9 @@
           });
           $$('[data-save]', resultsEl).forEach(function (btn) {
             btn.onclick = function () { saveToInventory(list[Number(btn.dataset.save)]); };
+          });
+          $$('[data-ana]', resultsEl).forEach(function (btn) {
+            btn.onclick = function () { sendToAnalysis(list[Number(btn.dataset.ana)]); };
           });
         });
       }).catch(function (e) { toast('查询失败：' + e.message, 'err'); })
@@ -1033,9 +1218,43 @@
           rowKV('Discogs 参考价', d.marketPrice ? (d.marketPrice + ' ' + (d.priceCurrency || '')) : '—') +
           '</div>' +
           (imgs ? '<div class="section-title">图片</div><div class="thumbs">' + imgs + '</div>' : '') +
-          '<div class="form-btns"><button class="btn btn-primary" id="saveDetail">保存到黑胶库存</button></div></div>';
+          '<div class="form-btns"><button class="btn" id="anaDetail">进入黑胶全分析</button>' +
+          '<button class="btn btn-primary" id="saveDetail">保存到黑胶库存</button></div></div>';
+        detailEl.querySelector('#anaDetail').onclick = function () { sendToAnalysis(d); };
         detailEl.querySelector('#saveDetail').onclick = function () { saveToInventory(d); };
       }).catch(function (e) { detailEl.innerHTML = '<div class="empty">详情加载失败：' + esc(e.message) + '</div>'; });
+    }
+
+    function sendToAnalysis(it) {
+      VHDB.getAll('full_analysis').then(function (rows) {
+        var dup = rows.find(function (r) {
+          return r.status === 'pending' && (
+            (it.catalog && r.catalog === it.catalog) ||
+            (it.album && r.name === it.album && it.artist && r.artist === it.artist)
+          );
+        });
+        if (dup) { toast('该专辑已在待分析列表', 'ok'); showView('analysis'); return; }
+        var rec = {
+          name: it.album || it.name || '',
+          artist: it.artist || '',
+          catalog: it.catalog || '',
+          version: it.version || '',
+          year: it.year || '',
+          company: it.label || '',
+          country: it.country || '',
+          versionInfo: it.limited || '',
+          cover: it.cover || '',
+          want: it.want != null ? it.want : null,
+          have: it.have != null ? it.have : null,
+          numForSale: it.numForSale != null ? it.numForSale : null,
+          marketPrice: it.marketPrice || '',
+          status: 'pending',
+          createdAt: new Date().toISOString()
+        };
+        return VHDB.add('full_analysis', rec).then(function () {
+          toast('已加入黑胶全分析待分析列表', 'ok'); showView('analysis');
+        });
+      }).catch(function (e) { toast('操作失败：' + e.message, 'err'); });
     }
 
     function saveToInventory(it) {
@@ -1310,6 +1529,7 @@
     else if (id === 'auth') mod = buildAuth();
     else if (id === 'websites') mod = buildWebsites();
     else if (id === 'discogs') mod = buildDiscogs();
+    else if (id === 'analysis') mod = buildAnalysis();
     else if (id === 'inventory') mod = buildInventory();
     else if (id === 'crm') mod = buildCrm();
     else if (id === 'plan') mod = buildPlan();

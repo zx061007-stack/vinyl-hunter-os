@@ -108,7 +108,11 @@
             images: images,
             marketPrice: stats.lowest_price ? stats.lowest_price.value : '',
             priceCurrency: stats.lowest_price ? stats.lowest_price.currency : '',
-            limited: special
+            limited: special,
+            // 社区数据：支撑「黑胶全分析」的海外热度计算
+            want: (rel.community && rel.community.want) || 0,
+            have: (rel.community && rel.community.have) || 0,
+            numForSale: rel.num_for_sale || 0
           };
         });
     });

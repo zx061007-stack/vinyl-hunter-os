@@ -7,9 +7,9 @@
   'use strict';
 
   var DB_NAME = 'vinyl_hunter_os';
-  var DB_VERSION = 1;
+  var DB_VERSION = 2;
 
-  // 所有对象仓库（已按精简后的 17 个模块裁剪）
+  // 所有对象仓库（已按精简后的 17 个模块裁剪；选品评分+套利分析已合并为 full_analysis）
   var STORES = [
     'daily_plans',     // 每日计划 (key=date)
     'hot_topics',      // 每日热点 (key=date)
@@ -19,13 +19,15 @@
     'discogs_db',      // Discogs 黑胶数据库 (auto id)
     'websites',       // 唱片网址收藏 (auto id)
     'auth_records',    // 真假鉴定记录 (auto id)
-    'selection_scores',// 选品评分记录 (auto id)
     'profit_calcs',    // 利润计算记录 (auto id)
-    'arbitrage',       // 套利分析记录 (auto id)
+    'full_analysis',   // 黑胶全分析记录（合并原选品评分+套利分析）(auto id)
     'inventory',       // 库存记录 (auto id)
     'crm',             // 客户 CRM (auto id)
     'settings'         // 系统设置 (key=__key)
   ];
+
+  // v1 -> v2：移除已合并的 selection_scores / arbitrage 仓库，新建 full_analysis。
+  var OBSOLETE_STORES = ['selection_scores', 'arbitrage'];
 
   // 以日期/配置为键的仓库（不使用自增 id）
   var KEYED_STORES = {
@@ -44,6 +46,10 @@
       var req = indexedDB.open(DB_NAME, DB_VERSION);
       req.onupgradeneeded = function (e) {
         var db = e.target.result;
+        // 清理已合并/废弃的仓库
+        OBSOLETE_STORES.forEach(function (s) {
+          if (db.objectStoreNames.contains(s)) db.deleteObjectStore(s);
+        });
         STORES.forEach(function (s) {
           if (!db.objectStoreNames.contains(s)) {
             if (KEYED_STORES[s]) {
