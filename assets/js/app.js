@@ -907,8 +907,11 @@
       renderAIResult(resultEl, rec, mid);
       VHDB.add('ai_analyses', rec).then(function () { loadAIHistory(histEl, mid); });
     }).catch(function (err) {
-      resultEl.innerHTML = '<div class="ai-error">❌ 分析失败：' + esc(err.message) + '</div>' +
-        '<div class="ai-tip">提示：未配置 AI 代理将使用本地分析。如需真实 AI，请在系统设置填写「AI分析代理地址」。</div>';
+      var hint = (err && err.message && (err.message.indexOf('Failed to fetch') >= 0 || err.message.indexOf('NetworkError') >= 0 || err.message.indexOf('超时') >= 0))
+        ? '（多为代理域名在国内手机网络被屏蔽/超时，可在「数据采集中心」点「网络诊断」确认，并把代理换成国内可访问的域名）'
+        : '（未配置 AI 代理将使用本地分析，不消耗 Token）';
+      resultEl.innerHTML = '<div class="ai-error">❌ 分析失败：' + esc((err && err.message) || '未知错误') + '</div>' +
+        '<div class="ai-tip">提示：' + hint + ' 如需真实 AI，请在系统设置填写「AI分析代理地址」。</div>';
     });
   }
 
@@ -1057,7 +1060,13 @@
     ];
     var node = elFrom('<div class="module"><h2>数据采集中心</h2>' +
       '<div class="hint">所有数据均需你主动点击按钮才会采集，<b>不会自动联网</b>，以节省 Token / API 额度。未配置数据源时，请在各模块使用「新增」手动录入。</div>' +
-      '<div class="dash-grid" id="hubGrid"></div></div>');
+      '<div class="dash-grid" id="hubGrid"></div>' +
+      '<div class="section-title" style="margin-top:18px">📡 手机无法获取 / AI 失败？先跑网络诊断</div>' +
+      '<div class="diag-box" id="hubDiag">' +
+      '  <div class="hint">数据获取与 AI 都走同一个代理（Cloudflare Worker）。如果你在手机上打不开，多半是该域名在你的网络/地区被屏蔽或超时。点下面按钮，会用<b>你当前手机</b>直接测试代理连通性。</div>' +
+      '  <button class="btn btn-primary" id="diagBtn" style="margin-top:10px">📡 开始网络诊断（用本机测）</button>' +
+      '  <div id="diagResult" class="diag-result"></div>' +
+      '</div></div>');
     node._refresh = function () {};
     var grid = $('#hubGrid', node);
     actions.forEach(function (a) {
@@ -1065,12 +1074,56 @@
         '<button class="btn btn-collect" style="margin-top:12px;width:100%">🔄 开始采集</button></div>');
       card.querySelector('button').onclick = function () {
         var b = card.querySelector('button'); b.disabled = true; var old = b.textContent; b.textContent = '采集中…';
-        a.fn().catch(function (e) { toast('采集失败：' + e.message, 'err'); })
+        a.fn()
+          .then(function () { /* toast 由采集函数负责 */ })
+          .catch(function (e) { toast('采集失败：' + networkErrHint(e), 'err'); })
           .then(function () { b.disabled = false; b.textContent = old; });
       };
       grid.appendChild(card);
     });
+    // 网络诊断
+    node.querySelector('#diagBtn').onclick = function () {
+      var btn = node.querySelector('#diagBtn');
+      var out = node.querySelector('#diagResult');
+      btn.disabled = true; btn.textContent = '诊断中…（最多 8 秒每项）';
+      out.innerHTML = '<div class="ai-loading">正在用本机测试代理连通性…</div>';
+      VHDB.getConfig().then(function (cfg) {
+        var proxy = cfg.chinaHotProxy || 'https://vinyl-proxy.w79m2n5jms.workers.dev';
+        return VHAPI.networkDiagnostics(proxy);
+      }).then(function (d) {
+        var rows = (d.endpoints || []).map(function (e) {
+          var ok = e.ok;
+          var cls = ok ? 'good' : 'bad';
+          var detail = ok
+            ? (e.status + ' · ' + e.latencyMs + 'ms · ' + (e.size || 0) + 'B')
+            : (e.error || ('HTTP ' + e.status));
+          return '<div class="diag-row ' + cls + '"><span>' + esc(e.name) + '</span><span>' + esc(detail) + '</span></div>';
+        }).join('');
+        var verdict;
+        if (d.blocked) {
+          verdict = '<div class="diag-verdict bad">⚠️ 你的网络/地区<b>无法访问该代理</b>（' + d.reachable + '/' + (d.endpoints || []).length + ' 个接口可达）。' +
+            '这是「数据获取 + AI」同时在手机上失败的最常见原因——代理域名 *.workers.dev 在国内手机网络常被屏蔽或超时。' +
+            '<br>解决办法：① 换能正常访问该域名的网络（如部分家庭宽带/科学上网）；② 在「系统设置」把两个代理地址改成<b>你自己的、国内可访问的域名</b>（绑定自定义域名或用国内可访问的代理）；③ 未配代理时 AI 会走本地确定性算法（不消耗 Token，但非大模型）。</div>';
+        } else if (!d.allUp) {
+          verdict = '<div class="diag-verdict warn">部分接口异常（' + d.reachable + '/' + (d.endpoints || []).length + ' 可达），可重试；若长期如此需检查代理部署。</div>';
+        } else {
+          verdict = '<div class="diag-verdict good">✅ 代理完全可达（' + d.reachable + '/' + (d.endpoints || []).length + '），如仍失败请检查浏览器缓存或重试。</div>';
+        }
+        out.innerHTML = '<div class="diag-head">代理：' + esc(d.proxy) + '</div>' + rows + verdict;
+      }).catch(function (e) {
+        out.innerHTML = '<div class="diag-verdict bad">诊断出错：' + esc(e.message) + '</div>';
+      }).then(function () { btn.disabled = false; btn.textContent = '📡 重新诊断'; });
+    };
     return { node: node, refresh: node._refresh };
+  }
+
+  // 把网络类错误翻译成更易懂的提示
+  function networkErrHint(e) {
+    var m = (e && e.message) || '';
+    if (m.indexOf('Failed to fetch') >= 0 || m.indexOf('NetworkError') >= 0) return '网络被拦截/无法连接代理（多为地域屏蔽 *.workers.dev，见数据采集中心「网络诊断」）';
+    if (m.indexOf('timeout') >= 0 || m.indexOf('超时') >= 0) return '请求超时（代理不可达或网络慢，见数据采集中心「网络诊断」）';
+    if (m.indexOf('HTTP') >= 0) return m;
+    return m || '未知错误';
   }
 
   // 黑胶真假鉴定助手（人工核对 + 图片上传，不做自动识别）

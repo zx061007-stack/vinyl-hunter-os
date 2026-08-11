@@ -272,6 +272,51 @@
     });
   }
 
+  // 网络诊断：直接从当前设备检测代理（Worker）各接口是否可达。
+  // 用于排查「手机无法获取 / AI 失败」——多半是网络或区域屏蔽（*.workers.dev 在国内常被墙）。
+  // 返回 { proxy, endpoints:[{name,ok,status,latencyMs,error}], reachable, blocked, allUp }
+  function networkDiagnostics(workerProxy) {
+    if (!workerProxy) return Promise.resolve({ error: '未配置代理地址', endpoints: [], reachable: 0, blocked: true, allUp: false });
+    function test(name, url, opts) {
+      var ctrl = (typeof AbortController !== 'undefined') ? new AbortController() : null;
+      var t0 = Date.now();
+      var to = ctrl ? setTimeout(function () { ctrl.abort(); }, 8000) : null;
+      var fopts = opts ? Object.assign({}, opts) : {};
+      if (ctrl) fopts.signal = ctrl.signal;
+      return fetch(url, fopts).then(function (r) {
+        if (to) clearTimeout(to);
+        return r.text().then(function (txt) {
+          return { name: name, ok: r.ok, status: r.status, latencyMs: Date.now() - t0, size: txt.length };
+        });
+      }).catch(function (e) {
+        if (to) clearTimeout(to);
+        return {
+          name: name, ok: false, status: 0, latencyMs: Date.now() - t0,
+          error: (e && e.name === 'AbortError') ? '超时（8 秒无响应）' : ((e && e.message) || '网络错误')
+        };
+      });
+    }
+    var base = workerProxy.replace(/\/$/, '');
+    return Promise.all([
+      test('热搜接口 GET /', base + '/'),
+      test('音乐资讯 GET /music-news', base + '/music-news'),
+      test('AI 分析 POST /ai-analyze', base + '/ai-analyze', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ systemPrompt: '测试', userPrompt: 'ping' })
+      })
+    ]).then(function (eps) {
+      var reachable = eps.filter(function (e) { return e.ok; }).length;
+      return {
+        proxy: base,
+        endpoints: eps,
+        reachable: reachable,
+        blocked: reachable === 0,
+        allUp: reachable === eps.length
+      };
+    });
+  }
+
   global.VHAPI = {
     fetchExchangeRates: fetchExchangeRates,
     fetchDiscogs: fetchDiscogs,
@@ -280,6 +325,7 @@
     fetchMusicBrainzNews: fetchMusicBrainzNews,
     fetchHotTopics: fetchHotTopics,
     fetchChinaHotWords: fetchChinaHotWords,
-    fetchAIAnalysis: fetchAIAnalysis
+    fetchAIAnalysis: fetchAIAnalysis,
+    networkDiagnostics: networkDiagnostics
   };
 })(window);
