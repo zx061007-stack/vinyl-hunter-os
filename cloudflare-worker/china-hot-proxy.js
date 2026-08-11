@@ -1,123 +1,338 @@
 /**
- * Vinyl Hunter OS — 中国热搜代理 + AI 分析代理（Cloudflare Worker）
+ * Vinyl Hunter OS — 中国热搜代理（4平台分采）+ 音乐资讯全网代理 + AI 分析代理
  * ----------------------------------------------------
- * 两个路由：
- *   GET  /           → 转发微博/抖音热搜，合并去重，返回 { words: [...] }
- *   POST /ai-analyze → 代理调 DeepSeek API，Key 存 Worker 端不泄露
- *
- * 部署：
- *   1. npm i -g wrangler
- *   2. wrangler init vinyl-proxy --type javascript（选 "Hello World"）
- *   3. 用本文件替换 src/index.js
- *   4. 设置 DeepSeek API Key（密钥存 Cloudflare，不进代码/聊天）：
- *        wrangler secret put DEEPSEEK_API_KEY
- *      粘贴你的 Key 回车即可
- *   5. wrangler deploy
- *   6. 部署后得到 https://vinyl-proxy.<子域>.workers.dev
- *   7. 系统设置 →「中国热搜代理地址」填 https://vinyl-proxy.<子域>.workers.dev
- *      系统设置 →「AI分析代理地址」填 https://vinyl-proxy.<子域>.workers.dev/ai-analyze
- *
- * 计费：Cloudflare Workers 免费档 10 万次/天，个人黑胶分析用量远不到。
- *       DeepSeek API 按量计费，一次分析约 0.005 元，极低。
+ * 路由：
+ *   GET  /             → 4平台热搜，每平台前5 { platforms:{weibo,douyin,bilibili,xiaohongshu}, words:[...], updatedAt }
+ *   GET  /hot          → 同上（兼容旧路径）
+ *   GET  /music-news   → 全网音乐资讯（MusicBrainz + iTunes），含预售价格，海内外覆盖
+ *   POST /ai-analyze   → 代理调 DeepSeek API，Key 存 Worker 端不泄露
  */
+
+// ========== 安全配置 ==========
+const MAX_PROMPT_LENGTH = 5000;
+const ALLOWED_ORIGIN = '*';
+
+// ========== 平台配置（删除闲鱼，无公开API） ==========
+var PLATFORMS = {
+  weibo:       { label: '微博',   color: '#e6162d' },
+  douyin:      { label: '抖音',   color: '#000000' },
+  bilibili:    { label: 'B站',    color: '#fb7299' },
+  xiaohongshu: { label: '小红书', color: '#ff2442' }
+};
+
+// 提取热词的通用函数
+function extractWords(data, format) {
+  var words = [];
+  if (!data) return words;
+  try {
+    if (format === 'uapis') {
+      var arr = data.list || (data.data && data.data.list) || [];
+      if (Array.isArray(arr)) {
+        arr.forEach(function (x) {
+          if (typeof x === 'string') { words.push(x.trim()); }
+          else { var w = x.title || x.keyword || x.name || x.word; if (w) words.push(String(w).trim()); }
+        });
+      }
+    } else if (format === 'bilibili') {
+      var arr3 = (data.data && data.data.trending && data.data.trending.list) || [];
+      arr3.forEach(function (x) { var w = x.keyword || x.show_name || x.title; if (w) words.push(String(w).trim()); });
+    } else if (format === 'douyin') {
+      var arr2 = data.word_list || data.data || [];
+      arr2.forEach(function (x) { var w = x.word || x.hotspot || x.title; if (w) words.push(String(w).trim()); });
+    } else if (Array.isArray(data)) {
+      data.forEach(function (x) {
+        if (typeof x === 'string') { words.push(x.trim()); }
+        else { var w = x.word || x.title || x.name || x.keyword; if (w) words.push(String(w).trim()); }
+      });
+    }
+  } catch (e) { /* 忽略解析错误 */ }
+  return words;
+}
+
+// 采集单个平台
+async function fetchPlatform(platform) {
+  var headers = { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' };
+  var uapisType = {
+    weibo: 'weibo',
+    douyin: 'douyin',
+    bilibili: 'bilibili',
+    xiaohongshu: 'xiaohongshu'
+  };
+
+  try {
+    if (platform === 'douyin') {
+      try {
+        var dyResp = await fetch('https://www.iesdouyin.com/web/api/v2/hotsearch/billboard/word/', {
+          headers: Object.assign(headers, { 'Referer': 'https://www.douyin.com/' })
+        });
+        var dyData = await dyResp.json();
+        var dyWords = extractWords(dyData, 'douyin');
+        if (dyWords.length) return dyWords;
+      } catch (e) { /* 回退 uapis */ }
+    }
+
+    if (platform === 'bilibili') {
+      try {
+        var biliResp = await fetch('https://api.bilibili.com/x/web-interface/search/square?limit=20', {
+          headers: Object.assign(headers, { 'Referer': 'https://www.bilibili.com/' })
+        });
+        var biliData = await biliResp.json();
+        var biliWords = extractWords(biliData, 'bilibili');
+        if (biliWords.length) return biliWords;
+      } catch (e) { /* 回退 uapis */ }
+    }
+
+    var uResp = await fetch('https://uapis.cn/api/v1/misc/hotboard?type=' + uapisType[platform], {
+      headers: headers
+    });
+    var uData = await uResp.json();
+    return extractWords(uData, 'uapis');
+  } catch (e) {
+    // 单平台失败不影响其他平台
+  }
+  return [];
+}
+
+// 全网音乐资讯：MusicBrainz（海外发行库）+ iTunes（含价格），合并去重，海内外覆盖
+async function fetchMusicNewsAll(limit) {
+  limit = limit || 25;
+  var d = new Date();
+  var ds = d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+
+  // 并行采集两个源
+  var mbPromise = (async function () {
+    try {
+      var mbUrl = 'https://musicbrainz.org/ws/2/release/?query=date:' + ds + '&fmt=json&limit=' + limit;
+      var mbResp = await fetch(mbUrl, {
+        headers: { 'Accept': 'application/json', 'User-Agent': 'VinylHunterOS/1.0 (music release tracker)' }
+      });
+      if (!mbResp.ok) return [];
+      var mbData = await mbResp.json();
+      var regionMap = { US: '美国', JP: '日本', KR: '韩国', TW: '中国港台', HK: '中国港台', CN: '中国港台' };
+      var eu = ['GB', 'DE', 'FR', 'ES', 'IT', 'NL', 'SE', 'NO', 'FI', 'DK', 'IE', 'CH', 'AT', 'BE', 'PT'];
+      return (mbData.releases || []).map(function (it) {
+        var ac = it['artist-credit'] || [];
+        var artist = (ac[0] && (ac[0].name || (ac[0].artist && ac[0].artist.name))) || '未知艺人';
+        var country = it.country || '';
+        var region = regionMap[country] || (eu.indexOf(country) >= 0 ? '欧洲' : '其他');
+        var fmt = (it.media && it.media[0] && it.media[0].format) || '';
+        var format = /vinyl/i.test(fmt) ? '黑胶' : (fmt || 'CD');
+        return {
+          artist: artist,
+          album: it.title || '',
+          region: region,
+          format: format,
+          releaseDate: it.date || '',
+          company: (it['label-info'] && it['label-info'][0] && it['label-info'][0].label && it['label-info'][0].label.name) || '',
+          country: country,
+          buyLink: '',
+          srcLink: 'https://musicbrainz.org/release/' + it.id,
+          cover: 'https://coverartarchive.org/release/' + it.id + '/front',
+          presalePrice: '',
+          priceCurrency: '',
+          source: 'MusicBrainz'
+        };
+      });
+    } catch (e) { return []; }
+  })();
+
+  // iTunes Search API：免费免Key，含 collectionPrice（预售价格）
+  var itunesPromise = (async function () {
+    try {
+      // 搜最近发行专辑，含价格信息
+      var itUrl = 'https://itunes.apple.com/search?term=new+release&entity=album&limit=' + limit + '&sort=recent';
+      var itResp = await fetch(itUrl, { headers: { 'Accept': 'application/json' } });
+      if (!itResp.ok) return [];
+      var itData = await itResp.json();
+      var regionMap = { US: '美国', JP: '日本', KR: '韩国', TW: '中国港台', HK: '中国港台', CN: '中国港台', GB: '欧洲', DE: '欧洲', FR: '欧洲' };
+      return (itData.results || []).map(function (it) {
+        var cc = it.country || '';
+        var region = regionMap[cc] || '其他';
+        var format = '数字';
+        var price = it.collectionPrice || it.price || '';
+        var currency = it.currency || '';
+        // 价格转人民币估算（简单换算）
+        var cnyPrice = '';
+        if (price && currency) {
+          var rateMap = { USD: 7.2, EUR: 7.8, GBP: 9.1, JPY: 0.048, HKD: 0.92, KRW: 0.0055, TWD: 0.22, CNY: 1, AUD: 4.7, CAD: 5.3 };
+          var r = rateMap[currency] || 1;
+          cnyPrice = (price * r).toFixed(0);
+        }
+        return {
+          artist: it.artistName || '',
+          album: it.collectionName || '',
+          region: region,
+          format: format,
+          releaseDate: (it.releaseDate || '').slice(0, 10),
+          company: it.copyright || '',
+          country: cc,
+          buyLink: it.collectionViewUrl || '',
+          srcLink: it.trackViewUrl || it.collectionViewUrl || '',
+          cover: it.artworkUrl100 ? it.artworkUrl100.replace('100x100', '300x300') : '',
+          presalePrice: cnyPrice ? (cnyPrice + ' 元') : '',
+          priceCurrency: currency,
+          source: 'iTunes'
+        };
+      });
+    } catch (e) { return []; }
+  })();
+
+  var results = await Promise.all([mbPromise, itunesPromise]);
+  var mbItems = results[0], itItems = results[1];
+
+  // 合并去重（按 artist+album）
+  var seen = {};
+  var merged = [];
+  mbItems.forEach(function (it) {
+    var key = (it.artist + '|' + it.album).toLowerCase().trim();
+    if (key && !seen[key]) { seen[key] = 1; merged.push(it); }
+  });
+  itItems.forEach(function (it) {
+    var key = (it.artist + '|' + it.album).toLowerCase().trim();
+    if (key && !seen[key]) {
+      seen[key] = 1;
+      // 如果 MusicBrainz 有同名但没价格，补充价格
+      merged.push(it);
+    } else if (key) {
+      // 给已有的 MusicBrainz 条目补充价格
+      var existing = merged.find(function (m) {
+        return (m.artist + '|' + m.album).toLowerCase().trim() === key;
+      });
+      if (existing && !existing.presalePrice && it.presalePrice) {
+        existing.presalePrice = it.presalePrice;
+        existing.priceCurrency = it.priceCurrency;
+        if (!existing.buyLink) existing.buyLink = it.buyLink;
+        if (!existing.cover || existing.cover.indexOf('coverartarchive') >= 0) existing.cover = it.cover;
+      }
+    }
+  });
+
+  return merged.slice(0, limit * 2);
+}
+
 export default {
   async fetch(request, env) {
-    const corsHeaders = {
-      'Access-Control-Allow-Origin': '*',
+    var corsHeaders = {
+      'Access-Control-Allow-Origin': ALLOWED_ORIGIN,
       'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
       'Access-Control-Allow-Headers': 'Content-Type',
       'Content-Type': 'application/json; charset=utf-8'
     };
 
-    // 预检请求直接放行
     if (request.method === 'OPTIONS') {
       return new Response(null, { headers: corsHeaders });
     }
 
-    const url = new URL(request.url);
+    var url = new URL(request.url);
 
-    // ========== 路由 1：AI 分析 ==========
+    // ========== 路由：AI 分析 ==========
     if (url.pathname === '/ai-analyze' && request.method === 'POST') {
-      const apiKey = env && env.DEEPSEEK_API_KEY;
+      var apiKey = env && env.DEEPSEEK_API_KEY;
       if (!apiKey) {
-        return new Response(JSON.stringify({ error: 'Worker 未配置 DEEPSEEK_API_KEY，请用 wrangler secret put DEEPSEEK_API_KEY 设置' }), { status: 500, headers: corsHeaders });
+        return new Response(JSON.stringify({
+          error: 'Worker 未配置 DEEPSEEK_API_KEY，请用 wrangler secret put DEEPSEEK_API_KEY 设置'
+        }), { status: 500, headers: corsHeaders });
       }
 
       try {
-        const body = await request.json();
-        const systemPrompt = body.systemPrompt || '你是黑胶商业分析助手。';
-        const userPrompt = body.userPrompt || '';
+        var body = await request.json();
+        var systemPrompt = body.systemPrompt || '你是黑胶商业分析助手。';
+        var userPrompt = body.userPrompt || '';
 
-        const resp = await fetch('https://api.deepseek.com/chat/completions', {
+        if (userPrompt.length > MAX_PROMPT_LENGTH) {
+          return new Response(JSON.stringify({
+            error: '分析内容过长（' + userPrompt.length + ' 字），超过上限 ' + MAX_PROMPT_LENGTH + ' 字，请减少数据量后重试'
+          }), { status: 400, headers: corsHeaders });
+        }
+
+        var aiResp = await fetch('https://api.deepseek.com/chat/completions', {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
             'Authorization': 'Bearer ' + apiKey
           },
           body: JSON.stringify({
-            model: 'deepseek-chat',
+            model: 'deepseek-v4-flash',
             messages: [
               { role: 'system', content: systemPrompt },
               { role: 'user', content: userPrompt }
             ],
             max_tokens: 2000,
-            temperature: 0.7
+            temperature: 0.7,
+            stream: false
           })
         });
 
-        if (!resp.ok) {
-          const errText = await resp.text();
-          return new Response(JSON.stringify({ error: 'DeepSeek API 返回 ' + resp.status + ': ' + errText.slice(0, 200) }), { status: 502, headers: corsHeaders });
+        if (!aiResp.ok) {
+          var errText = await aiResp.text();
+          return new Response(JSON.stringify({
+            error: 'DeepSeek API 返回 ' + aiResp.status + ': ' + errText.slice(0, 300)
+          }), { status: 502, headers: corsHeaders });
         }
 
-        const data = await resp.json();
-        const result = (data.choices && data.choices[0] && data.choices[0].message && data.choices[0].message.content) || 'AI 返回为空';
+        var aiData = await aiResp.json();
+        var result = (aiData.choices && aiData.choices[0] && aiData.choices[0].message && aiData.choices[0].message.content) || 'AI 返回为空';
 
         return new Response(JSON.stringify({
           ok: true,
           result: result,
-          model: data.model || 'deepseek-chat',
-          usage: data.usage || {}
+          model: aiData.model || 'deepseek-v4-flash',
+          usage: aiData.usage || {}
         }), { headers: corsHeaders });
       } catch (e) {
-        return new Response(JSON.stringify({ error: 'AI 分析异常：' + e.message }), { status: 500, headers: corsHeaders });
+        return new Response(JSON.stringify({
+          error: 'AI 分析异常：' + e.message
+        }), { status: 500, headers: corsHeaders });
       }
     }
 
-    // ========== 路由 2：中国热搜代理（原有功能） ==========
-    const results = [];
-    const push = (arr) => {
-      (arr || []).forEach((x) => {
-        const w = x && (x.word || x.title || x.name || x);
-        if (w && String(w).trim()) results.push(String(w).trim());
+    // ========== 路由：全网音乐资讯（MusicBrainz + iTunes，含预售价格）==========
+    if (url.pathname === '/music-news') {
+      try {
+        var limit = url.searchParams.get('limit') || '25';
+        var items = await fetchMusicNewsAll(parseInt(limit) || 25);
+        return new Response(JSON.stringify({
+          releases: items,
+          sources: ['MusicBrainz', 'iTunes'],
+          coverage: '海内外全网',
+          count: items.length,
+          updatedAt: Date.now()
+        }), { headers: corsHeaders });
+      } catch (e) {
+        return new Response(JSON.stringify({
+          error: '音乐资讯代理异常：' + e.message
+        }), { status: 500, headers: corsHeaders });
+      }
+    }
+
+    // ========== 路由：4平台热搜（每平台前5）==========
+    var platformList = Object.keys(PLATFORMS);
+    var promises = platformList.map(function (p) {
+      return fetchPlatform(p).then(function (words) {
+        return { platform: p, words: words };
       });
-    };
-
-    // 微博热搜
-    try {
-      const wb = await fetch('https://weibo.com/ajax/side/hot/search', {
-        headers: { 'User-Agent': 'Mozilla/5.0', 'Referer': 'https://weibo.com/' }
-      });
-      const wd = await wb.json();
-      push((wd && wd.data && wd.data.realtime) || []);
-    } catch (e) { /* 忽略单项失败 */ }
-
-    // 抖音热搜
-    try {
-      const dy = await fetch('https://www.iesdouyin.com/web/api/v2/hotsearch/billboard/word/', {
-        headers: { 'User-Agent': 'Mozilla/5.0', 'Referer': 'https://www.douyin.com/' }
-      });
-      const dd = await dy.json();
-      push(dd.word_list || []);
-    } catch (e) { /* 忽略单项失败 */ }
-
-    // 去重
-    const seen = {};
-    const words = [];
-    results.forEach((w) => { if (!seen[w]) { seen[w] = 1; words.push(w); } });
-
-    return new Response(JSON.stringify({ words: words.slice(0, 200), updatedAt: Date.now() }), {
-      headers: corsHeaders
     });
+
+    var results = await Promise.all(promises);
+    var platforms = {};
+    var allWords = [];
+    var seen = {};
+
+    results.forEach(function (r) {
+      var deduped = [];
+      (r.words || []).forEach(function (w) {
+        if (w && !seen[w]) { seen[w] = 1; deduped.push(w); allWords.push(w); }
+        else if (w && deduped.indexOf(w) < 0) { deduped.push(w); }
+      });
+      // 每平台只取前5条
+      platforms[r.platform] = deduped.slice(0, 5);
+    });
+
+    return new Response(JSON.stringify({
+      platforms: platforms,
+      platformLabels: PLATFORMS,
+      words: allWords.slice(0, 200),
+      updatedAt: Date.now()
+    }), { headers: corsHeaders });
   }
 };

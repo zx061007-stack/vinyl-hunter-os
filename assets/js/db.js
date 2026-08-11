@@ -135,9 +135,14 @@
   }
 
   // 系统配置读写（保存在 settings 仓库 __key='config'）
+  var WORKER_BASE = 'https://vinyl-proxy.w79m2n5jms.workers.dev';
+
   function getConfig() {
     return dbGet('settings', 'config').then(function (r) {
-      return (r && r.value) ? r.value : {};
+      var cfg = (r && r.value) ? r.value : {};
+      if (cfg.chinaHotProxy === undefined) cfg.chinaHotProxy = WORKER_BASE;
+      if (cfg.aiProxyUrl === undefined) cfg.aiProxyUrl = WORKER_BASE + '/ai-analyze';
+      return cfg;
     });
   }
 

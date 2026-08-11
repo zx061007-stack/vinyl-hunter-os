@@ -126,19 +126,27 @@
     });
   }
 
-  // 全球音乐资讯默认源：MusicBrainz 发行数据库。
-  // 免费、免 Key、支持 CORS（Access-Control-Allow-Origin: *），浏览器可直接请求。
-  // 返回与音乐资讯模块兼容的 items 数组：artist/album/region/format/releaseDate/
-  // company/country/buyLink/srcLink/cover。
-  function fetchMusicBrainzNews(limit) {
+  // 全网音乐资讯：通过 Worker 代理获取 MusicBrainz + iTunes 合并数据（含预售价格，海内外覆盖）。
+  // 如果传入 workerProxy（Cloudflare Worker 地址），则通过 Worker 代理访问。
+  // 返回 items 数组：artist/album/region/format/releaseDate/company/country/buyLink/srcLink/cover/presalePrice。
+  function fetchMusicBrainzNews(workerProxy, limit) {
     limit = limit || 25;
     var d = new Date();
     var ds = d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
-    var url = 'https://musicbrainz.org/ws/2/release/?query=date:' + ds + '&fmt=json&limit=' + limit;
+    // 有 Worker 代理时走 Worker（解决国内被墙 + CORS + 含价格 + 全网数据），否则直连 MusicBrainz（海外用户可用）
+    var url = workerProxy
+      ? workerProxy.replace(/\/$/, '') + '/music-news?limit=' + limit
+      : 'https://musicbrainz.org/ws/2/release/?query=date:' + ds + '&fmt=json&limit=' + limit;
     return fetch(url, { headers: { 'Accept': 'application/json' } }).then(function (r) {
       if (!r.ok) throw new Error('MusicBrainz ' + r.status);
       return r.json();
     }).then(function (data) {
+      if (data && data.error) throw new Error(data.error);
+      // Worker 新格式：{ releases:[...], sources, coverage }
+      if (data && Array.isArray(data.releases)) {
+        return data.releases;
+      }
+      // 旧格式直连 MusicBrainz
       var regionMap = { US: '美国', JP: '日本', KR: '韩国', TW: '中国港台', HK: '中国港台', CN: '中国港台' };
       var eu = ['GB', 'DE', 'FR', 'ES', 'IT', 'NL', 'SE', 'NO', 'FI', 'DK', 'IE', 'CH', 'AT', 'BE', 'PT'];
       return (data.releases || []).map(function (it) {
@@ -159,9 +167,50 @@
           buyLink: '',
           srcLink: 'https://musicbrainz.org/release/' + it.id,
           cover: 'https://coverartarchive.org/release/' + it.id + '/front',
+          presalePrice: '',
           source: 'MusicBrainz'
         };
       });
+    });
+  }
+
+  // 每日热点采集：通过 Worker 热搜数据源，每平台取前5热词，统一转换为视频/音频条目。
+  // 3个按钮获取相同数据：每平台最热门的前5个。
+  // workerProxy: Worker 地址（如 https://vinyl-proxy.xxx.workers.dev）
+  // 返回 { videos:[], accounts:[], audios:[], platformGroups:{} }
+  // platformGroups 按平台分组：{ weibo:{label,items:[]}, douyin:{...}, ... }
+  function fetchHotTopics(workerProxy) {
+    if (!workerProxy) return Promise.reject(new Error('未配置热搜代理地址'));
+    return fetchJson(workerProxy).then(function (data) {
+      var platforms = data.platforms || {};
+      var platformLabels = data.platformLabels || {};
+      var videos = [];
+      var audios = [];
+      var accounts = [];
+      var platformGroups = {};
+
+      function platformLabel(p) {
+        return (platformLabels[p] && platformLabels[p].label) || p;
+      }
+
+      // 全平台合并：每平台前5条
+      Object.keys(platforms).forEach(function (p) {
+        var label = platformLabel(p);
+        var words = (platforms[p] || []).slice(0, 5);
+        var pItems = [];
+        words.forEach(function (w, idx) {
+          var item = { title: w, author: label + '热搜', account: label, platform: p, rank: idx + 1, likes: '', comments: '', reason: label + '平台热搜词' };
+          videos.push(item);
+          pItems.push(item);
+          audios.push({ name: w, singer: '', usage: label + '热搜', platform: p, reason: label + '平台热搜趋势词' });
+        });
+        if (words.length) {
+          accounts.push({ author: label + '热搜榜', account: label, platform: p, dir: '热搜趋势追踪' });
+          platformGroups[p] = { label: label, items: pItems, count: pItems.length };
+        }
+      });
+
+      return { videos: videos, accounts: accounts, audios: audios, platformGroups: platformGroups };
     });
   }
 
@@ -169,8 +218,27 @@
   // 代理需返回标准化 { words: ["词1","词2",...] }（也兼容微博 {data:{realtime:[{word}]}}、
   // 抖音 {word_list:[{word}]} 等格式）。代理负责解决浏览器跨域(CORS)。
   // 仅在用户点击【开始分析】且配置了代理地址时才调用——按钮触发，不自动联网。
+  // 返回 { platforms: { weibo:[], douyin:[], bilibili:[], xiaohongshu:[] }, words:[], updatedAt }
+  // words 为全平台合并去重后的数组（向后兼容）。
   function fetchChinaHotWords(proxyUrl) {
     return fetchJson(proxyUrl).then(function (data) {
+      // 新格式：分平台
+      if (data && data.platforms) {
+        var allWords = [];
+        var seen = {};
+        Object.keys(data.platforms).forEach(function (p) {
+          (data.platforms[p] || []).forEach(function (w) {
+            if (w && !seen[w]) { seen[w] = 1; allWords.push(w); }
+          });
+        });
+        return {
+          platforms: data.platforms,
+          platformLabels: data.platformLabels || {},
+          words: allWords.slice(0, 200),
+          updatedAt: data.updatedAt || Date.now()
+        };
+      }
+      // 旧格式兼容：纯数组或 {words:[]}
       var words = [];
       function push(x) { var s = x && (x.word || x.title || x.name || x); if (s && String(s).trim()) words.push(String(s).trim()); }
       if (data && Array.isArray(data.words)) data.words.forEach(push);
@@ -178,9 +246,9 @@
       else if (data && Array.isArray(data.word_list)) data.word_list.forEach(push);
       else if (data && Array.isArray(data.trending)) data.trending.forEach(push);
       else if (Array.isArray(data)) data.forEach(push);
-      var seen = {}, uniq = [];
-      words.forEach(function (w) { if (!seen[w]) { seen[w] = 1; uniq.push(w); } });
-      return uniq.slice(0, 200);
+      var seen2 = {}, uniq = [];
+      words.forEach(function (w) { if (!seen2[w]) { seen2[w] = 1; uniq.push(w); } });
+      return { platforms: {}, platformLabels: {}, words: uniq.slice(0, 200), updatedAt: Date.now() };
     });
   }
 
@@ -210,6 +278,7 @@
     fetchDiscogsRelease: fetchDiscogsRelease,
     fetchJson: fetchJson,
     fetchMusicBrainzNews: fetchMusicBrainzNews,
+    fetchHotTopics: fetchHotTopics,
     fetchChinaHotWords: fetchChinaHotWords,
     fetchAIAnalysis: fetchAIAnalysis
   };

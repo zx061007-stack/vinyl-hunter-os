@@ -1,3 +1,4 @@
 .workbuddy/
 .git/
 *.log
+node_modules/

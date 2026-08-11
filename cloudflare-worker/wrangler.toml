@@ -1,0 +1,10 @@
+name = "vinyl-proxy"
+main = "china-hot-proxy.js"
+compatibility_date = "2024-12-01"
+
+# 部署后地址：https://vinyl-proxy.<你的子域>.workers.dev
+# 免费档：10 万次/天，足够个人使用
+
+# DeepSeek API Key 不要写在这里！
+# 用以下命令设置（Key 存在 Cloudflare 加密存储中，不进代码）：
+#   wrangler secret put DEEPSEEK_API_KEY

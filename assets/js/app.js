@@ -49,7 +49,7 @@
     });
   }
 
-  /* ---------------- 导航配置（17 个模块） ---------------- */
+  /* ---------------- 导航配置（16 个模块） ---------------- */
   var NAV = [
     { id: 'dashboard', label: '首页驾驶舱', icon: '🏠' },
     { id: 'datahub', label: '数据采集中心', icon: '🛰️' },
@@ -79,39 +79,64 @@
   }
   function collectMusicNews() {
     return VHDB.getConfig().then(function (cfg) {
-      // 未配置自定义资讯源时，默认使用 MusicBrainz 全球发行库（免费、免 Key、支持 CORS）。
+      // 优先走 Worker 代理（全网数据：MusicBrainz + iTunes，含预售价格，海内外覆盖）
+      // 用户也可在系统设置填 musicNewsSource 自定义源覆盖
       var p = cfg.musicNewsSource
         ? VHAPI.fetchJson(cfg.musicNewsSource).then(function (data) {
-            return Array.isArray(data) ? data : (data.items || []);
+            return Array.isArray(data) ? data : (data.items || data.releases || []);
           })
-        : VHAPI.fetchMusicBrainzNews();
+        : VHAPI.fetchMusicBrainzNews(cfg.chinaHotProxy);
       return p.then(function (items) {
         return VHDB.put('music_news', { date: todayStr(), items: items }).then(function () {
-          toast('已采集 ' + items.length + ' 条音乐资讯（MusicBrainz）', 'ok');
+          toast('已采集 ' + items.length + ' 条音乐资讯（全网·海内外）', 'ok');
         });
       });
     });
   }
   function collectHot() {
     return VHDB.getConfig().then(function (cfg) {
-      if (!cfg.hotTopicSource) { toast('未配置热点源，请在系统设置配置或使用手动添加', 'err'); return; }
-      return VHAPI.fetchJson(cfg.hotTopicSource).then(function (data) {
-        var rec = { date: todayStr(), videos: data.videos || [], accounts: data.accounts || [], audios: data.audios || [] };
-        return VHDB.put('hot_topics', rec).then(function () { toast('今日热点已采集', 'ok'); });
-      });
+      // 优先用用户自定义源，否则用 Worker 热搜代理
+      if (cfg.hotTopicSource) {
+        return VHAPI.fetchJson(cfg.hotTopicSource).then(function (data) {
+          var rec = { date: todayStr(), videos: data.videos || [], accounts: data.accounts || [], audios: data.audios || [] };
+          return VHDB.put('hot_topics', rec).then(function () { toast('今日热点已采集', 'ok'); });
+        });
+      }
+      if (cfg.chinaHotProxy) {
+        return VHAPI.fetchHotTopics(cfg.chinaHotProxy).then(function (data) {
+          var rec = { date: todayStr(), videos: data.videos || [], accounts: data.accounts || [], audios: data.audios || [], platformGroups: data.platformGroups || {} };
+          return VHDB.put('hot_topics', rec).then(function () {
+            toast('已采集 ' + rec.videos.length + ' 条热搜（每平台前5）', 'ok');
+          });
+        });
+      }
+      toast('未配置数据源，请在系统设置配置或使用手动添加', 'err');
     });
   }
   function collectAudio() {
     return VHDB.getConfig().then(function (cfg) {
-      if (!cfg.audioSource) { toast('未配置热门音频源，请在系统设置配置或使用手动添加', 'err'); return; }
-      return VHAPI.fetchJson(cfg.audioSource).then(function (data) {
-        var audios = Array.isArray(data) ? data : (data.audios || []);
-        return VHDB.get('hot_topics', todayStr()).then(function (rec) {
-          rec = rec || { date: todayStr(), videos: [], accounts: [] };
-          rec.audios = audios;
-          return VHDB.put('hot_topics', rec).then(function () { toast('热门音频已采集', 'ok'); });
+      // 优先用用户自定义源，否则用 Worker 热搜代理
+      if (cfg.audioSource) {
+        return VHAPI.fetchJson(cfg.audioSource).then(function (data) {
+          var audios = Array.isArray(data) ? data : (data.audios || []);
+          return VHDB.get('hot_topics', todayStr()).then(function (rec) {
+            rec = rec || { date: todayStr(), videos: [], accounts: [] };
+            rec.audios = audios;
+            return VHDB.put('hot_topics', rec).then(function () { toast('热门音频已采集', 'ok'); });
+          });
         });
-      });
+      }
+      if (cfg.chinaHotProxy) {
+        return VHAPI.fetchHotTopics(cfg.chinaHotProxy).then(function (data) {
+          var audios = data.audios || [];
+          return VHDB.get('hot_topics', todayStr()).then(function (rec) {
+            rec = rec || { date: todayStr(), videos: [], accounts: [] };
+            rec.audios = audios;
+            return VHDB.put('hot_topics', rec).then(function () { toast('已采集 ' + audios.length + ' 条热门音频（每平台前5）', 'ok'); });
+          });
+        });
+      }
+      toast('未配置数据源，请在系统设置配置或使用手动添加', 'err');
     });
   }
 
@@ -234,9 +259,9 @@
   // 输入 d 需含：name/artist/catalog/version/versionInfo/year/company/country
   //   可选 Discogs 社区数据：want/have/numForSale
   //   用户填写：buyPrice（购入价）/presalePrice（预售价）
-  // 输出：versionValue/overseasHot(+level/text)/chinaHot(+level/text)/collectValue/
+  // 输出：versionValue/overseasHot(+level/text)/chinaHot(+level/text/ platforms)/collectValue/
   //       score/level/profit/margin/advice/reason
-  function analyzeVinyl(d, chinaHotWords) {
+  function analyzeVinyl(d, hotData) {
     var buy = Number(d.buyPrice) || 0;
     var sell = Number(d.presalePrice) || 0;
 
@@ -275,32 +300,70 @@
     }
     var overseasLevel = overseasHot >= 75 ? '高' : overseasHot >= 60 ? '中' : '低';
 
-    // 三、中国热度（优先用微博/抖音热搜匹配活跃度；无数据则本地估算）
+    // 三、中国热度（4平台分采：微博/抖音/B站/小红书，按歌手/厂牌/专辑名匹配）
     var estBase = clamp(Math.round(overseasHot * 0.82 + (vLimited ? 6 : 0) + (vFirst ? 4 : 0) - 6), 30, 95);
-    var hotWords = Array.isArray(chinaHotWords) ? chinaHotWords : [];
-    var chinaHot, chinaText, chinaSource;
-    if (hotWords.length) {
+    // hotData 可以是 { platforms:{}, words:[] } 或旧格式数组
+    var hotPlatforms = (hotData && hotData.platforms) ? hotData.platforms : {};
+    var hotWords = (hotData && Array.isArray(hotData.words)) ? hotData.words : (Array.isArray(hotData) ? hotData : []);
+    var chinaHot, chinaText, chinaSource, chinaPlatforms = {};
+    var platformLabels = { weibo:'微博', douyin:'抖音', bilibili:'B站', xiaohongshu:'小红书' };
+    if (hotWords.length || Object.keys(hotPlatforms).length) {
       // 用歌手 / 厂牌（识别度高的实体）以及专辑名显著词去匹配热搜
       var keywords = [d.artist, d.company].filter(function (k) { return k && String(k).trim().length >= 2; })
         .map(function (k) { return String(k).trim(); })
         .concat(String(d.name || '').split(/[\s\-–—/]+/).filter(function (w) { return w.length >= 3; }));
-      var hits = [];
-      hotWords.forEach(function (w) {
-        keywords.forEach(function (k) {
-          if (w && (w.indexOf(k) >= 0 || k.indexOf(w) >= 0) && hits.indexOf(k) < 0) hits.push(k);
+      var allHits = [];
+      var totalMatched = 0;
+
+      // 分平台匹配
+      Object.keys(hotPlatforms).forEach(function (p) {
+        if (p === 'xianyu') return; // 闲鱼已移除
+        var pWords = hotPlatforms[p] || [];
+        var pHits = [];
+        pWords.forEach(function (w) {
+          keywords.forEach(function (k) {
+            if (w && (w.indexOf(k) >= 0 || k.indexOf(w) >= 0) && pHits.indexOf(k) < 0) pHits.push(k);
+          });
         });
+        chinaPlatforms[p] = { total: pWords.length, hits: pHits, sample: pWords.slice(0, 10) };
+        pHits.forEach(function (k) { if (allHits.indexOf(k) < 0) allHits.push(k); });
+        if (pHits.length) totalMatched++;
       });
+
+      // 如果没有分平台数据，回退到合并数组匹配
+      if (!Object.keys(hotPlatforms).length && hotWords.length) {
+        var legacyHits = [];
+        hotWords.forEach(function (w) {
+          keywords.forEach(function (k) {
+            if (w && (w.indexOf(k) >= 0 || k.indexOf(w) >= 0) && legacyHits.indexOf(k) < 0) legacyHits.push(k);
+          });
+        });
+        allHits = legacyHits;
+      }
+
       var base = clamp(Math.round(overseasHot * 0.7 + (vLimited ? 6 : 0) + (vFirst ? 4 : 0) - 6), 30, 92);
-      if (hits.length) {
-        var bonus = hits.length >= 3 ? 35 : hits.length === 2 ? 28 : 18;
-        chinaHot = clamp(base + bonus, 30, 100);
-        chinaSource = '微博/抖音热搜命中';
-        chinaText = '基于微博/抖音热搜数据（共 ' + hotWords.length + ' 条）匹配到歌手/厂牌关键词：' + hits.join('、') +
-          '（' + hits.length + ' 处命中）。中国社交平台讨论热度高，粉丝需求与收藏市场预期强。';
+      // 搜索次数统计文本
+      var searchCountText = Object.keys(hotPlatforms).filter(function(p) { return p !== 'xianyu'; }).map(function (p) {
+        return platformLabels[p] + ' ' + (hotPlatforms[p] || []).length + '条';
+      }).join(' / ');
+
+      if (allHits.length) {
+        // 命中平台数越多加成越高
+        var platformBonus = totalMatched >= 3 ? 12 : totalMatched >= 2 ? 8 : totalMatched >= 1 ? 5 : 0;
+        var hitBonus = allHits.length >= 3 ? 35 : allHits.length === 2 ? 28 : 18;
+        chinaHot = clamp(base + hitBonus + platformBonus, 30, 100);
+        var platformNames = Object.keys(hotPlatforms).filter(function (p) { return p !== 'xianyu' && (chinaPlatforms[p] || {}).hits && chinaPlatforms[p].hits.length; });
+        chinaSource = platformNames.length ? (platformNames.map(function (p) {
+          return platformLabels[p] || p;
+        }).join('/') + '热搜命中') : '热搜命中';
+        chinaText = '基于4平台热搜数据（搜索次数：' + searchCountText + '）匹配到关键词：' + allHits.join('、') +
+          '。命中 ' + totalMatched + ' 个平台（' + platformNames.map(function (p) {
+            return platformLabels[p] + ':' + (chinaPlatforms[p].hits.join(','));
+          }).join('；') + '）。中国社交平台讨论热度高，粉丝需求与收藏市场预期强。';
       } else {
         chinaHot = clamp(base, 30, 95);
-        chinaSource = '微博/抖音热搜（未命中）';
-        chinaText = '已接入微博/抖音热搜数据（共 ' + hotWords.length + ' 条），未匹配到该艺人/厂牌，结合版本稀缺度与海外需求频率推算中国市场需求中等或有限。';
+        chinaSource = '4平台热搜（未命中）';
+        chinaText = '已接入4平台热搜数据（搜索次数：' + (searchCountText || '共 ' + hotWords.length + ' 条') + '），未匹配到该艺人/厂牌，结合版本稀缺度与海外需求频率推算中国市场需求中等或有限。';
       }
     } else {
       chinaHot = estBase;
@@ -308,6 +371,7 @@
       chinaText = '（参考估算）未配置中国热搜代理地址，基于海外需求频率与版本稀缺度推算。如需真实中国热度，请在系统设置填写热搜代理地址。' +
         (chinaHot >= 75 ? '中国粉丝需求与收藏市场预期较高。' : chinaHot >= 60 ? '中国市场需求中等。' : '中国市场认知度与需求相对有限。');
     }
+    var chinaLevel = chinaHot >= 75 ? '高' : chinaHot >= 60 ? '中' : '低';
 
     // 四、收藏价值
     var scarcityScore = (want && have) ? clamp(Math.round(want / Math.max(have, 1) * 40 + (numForSale < 20 ? 30 : 10)), 0, 100) : versionValue;
@@ -339,7 +403,7 @@
 
     d.versionValue = versionValue;
     d.overseasHot = overseasHot; d.overseasLevel = overseasLevel; d.overseasText = overseasText;
-    d.chinaHot = chinaHot; d.chinaLevel = chinaLevel; d.chinaText = chinaText; d.chinaSource = chinaSource;
+    d.chinaHot = chinaHot; d.chinaLevel = chinaLevel; d.chinaText = chinaText; d.chinaSource = chinaSource; d.chinaPlatforms = chinaPlatforms;
     d.collectValue = collectValue;
     d.score = score; d.level = level;
     d.profit = profit; d.margin = margin;
@@ -393,6 +457,20 @@
    * 所有结果永久保存到 IndexedDB（ai_analyses 仓库），刷新/关浏览器不丢失。
    * =================================================================== */
 
+  // 统一7段式输出格式模板
+  function aiFormat(subject, verdict, score, pros, risks, action, nextStep) {
+    var s = '【分析对象】\n' + subject + '\n\n';
+    s += '【核心判断】\n' + verdict + '\n\n';
+    s += '【评分】\n' + score + '\n\n';
+    s += '【优势】\n' + pros + '\n\n';
+    s += '【风险】\n' + risks + '\n\n';
+    s += '【建议】\n' + action + '\n\n';
+    s += '【下一步行动】\n' + nextStep;
+    return s;
+  }
+  // 统一 AI system prompt 后缀
+  var AI_FORMAT_SUFFIX = '\n\n请严格按以下7段式格式输出：\n【分析对象】\n【核心判断】\n【评分】\n【优势】\n【风险】\n【建议】\n【下一步行动】';
+
   var AI_CONFIGS = {
     plan: {
       label: 'AI分析今日执行情况',
@@ -403,7 +481,7 @@
       },
       prompt: function (d) {
         return {
-          system: '你是黑胶商业工作台的AI助手。分析用户今日计划执行情况，输出：任务完成率、完成习惯、执行效率、拖延问题、下一步优化建议。用中文，结构清晰。',
+          system: '你是黑胶商业工作台的AI助手。分析用户今日计划执行情况，输出：任务完成率、完成习惯、执行效率、拖延问题、下一步优化建议。' + AI_FORMAT_SUFFIX,
           user: '今日计划数据：\n' + JSON.stringify(d, null, 2)
         };
       },
@@ -412,21 +490,15 @@
         var done = tasks.filter(function (t) { return t.done; }).length;
         var rate = tasks.length ? Math.round(done / tasks.length * 100) : 0;
         var pending = tasks.filter(function (t) { return !t.done; }).map(function (t) { return '· ' + t.text; }).join('\n');
-        var s = '【今日执行情况分析】\n\n';
-        s += '一、任务完成率\n完成任务 ' + done + '/' + tasks.length + '，完成率 ' + rate + '%。\n';
-        s += rate >= 80 ? '执行率优秀，保持节奏。\n\n' : rate >= 50 ? '执行率中等，部分任务需跟进。\n\n' : '执行率偏低，需关注拖延问题。\n\n';
-        s += '二、完成习惯分析\n';
-        var habitTasks = tasks.filter(function (t) { return /早起|爬楼梯|睡觉|运动|收集/.test(t.text); });
-        var habitDone = habitTasks.filter(function (t) { return t.done; }).length;
-        s += '习惯类任务 ' + habitDone + '/' + habitTasks.length + ' 完成。';
-        s += habitDone >= habitTasks.length * 0.7 ? '习惯养成良好。\n\n' : '部分习惯未坚持，建议优先完成习惯类任务。\n\n';
-        s += '三、执行效率\n';
-        s += tasks.length > 8 ? '今日任务偏多(' + tasks.length + '项)，建议控制在5-7项以提高完成率。\n\n' : '任务数量适中，聚焦度高。\n\n';
-        s += '四、拖延问题\n';
-        s += pending ? '未完成任务：\n' + pending + '\n\n' : '无拖延任务。\n\n';
-        s += '五、优化建议\n';
-        s += rate >= 80 ? '· 保持当前节奏，可适当增加黑胶采购相关任务\n· 关注高优先级任务' : '· 建议将大任务拆分为小步骤\n· 习惯类任务优先安排在早晨\n· 每日复盘未完成任务原因';
-        return s;
+        return aiFormat(
+          '今日计划执行情况（' + todayStr() + '）',
+          '完成任务 ' + done + '/' + tasks.length + '，完成率 ' + rate + '%。' + (rate >= 80 ? '执行率优秀。' : rate >= 50 ? '执行率中等，部分需跟进。' : '执行率偏低，需关注拖延。'),
+          '执行评分：' + rate + '/100',
+          rate >= 50 ? '· 已完成' + done + '项任务\n· 保持了工作节奏' : '· 已开始执行部分任务',
+          (pending ? '· 未完成任务：\n' + pending : '· 无拖延任务') + '\n· ' + (tasks.length > 8 ? '任务偏多，影响聚焦' : '任务数量适中'),
+          rate >= 80 ? '保持当前节奏，适当增加黑胶采购任务' : '将大任务拆分，习惯类优先安排早晨，每日复盘未完成原因',
+          '· 明日优先安排高价值任务\n· 习惯类任务保持连续性\n· 每周回顾完成率趋势'
+        );
       }
     },
     websites: {
@@ -434,29 +506,27 @@
       collect: function () { return VHDB.getAll('websites'); },
       prompt: function (d) {
         return {
-          system: '你是黑胶商业工作台的AI助手。分析用户收藏的黑胶网站，输出：网站类型统计、用途分类、推荐分类、是否重复、哪些最适合购买、哪些适合查询。用中文，结构清晰。',
+          system: '你是黑胶商业工作台的AI助手。分析用户收藏的黑胶网站，输出：网站类型统计、用途分类、推荐分类、是否重复、哪些最适合购买、哪些适合查询。' + AI_FORMAT_SUFFIX,
           user: '网站收藏数据：\n' + JSON.stringify(d.map(function (w) { return { name: w.name, url: w.url, category: w.category, note: w.note }; }), null, 2)
         };
       },
       local: function (rows) {
-        var s = '【网站整理分析】\n\n';
-        s += '一、网站类型统计\n共收藏 ' + rows.length + ' 个网站。\n';
         var cats = {};
         rows.forEach(function (r) { var c = r.category || '未分类'; cats[c] = (cats[c] || 0) + 1; });
-        Object.keys(cats).forEach(function (c) { s += '· ' + c + '：' + cats[c] + ' 个\n'; });
-        s += '\n二、用途分类\n';
-        s += '· 购买平台：' + rows.filter(function (r) { return /购买|平台|mercari|ebay|淘宝|闲鱼/i.test(r.category + r.name + r.url); }).map(function (r) { return r.name; }).join('、') + '\n';
-        s += '· 资料查询：' + rows.filter(function (r) { return /查询|资料|discogs/i.test(r.category + r.name + r.url); }).map(function (r) { return r.name; }).join('、') + '\n';
-        s += '· 资讯学习：' + rows.filter(function (r) { return /资讯|学习|news/i.test(r.category + r.name + r.url); }).map(function (r) { return r.name; }).join('、') + '\n';
-        s += '\n三、重复检测\n';
-        var urls = {}, dups = [];
+        var buySites = rows.filter(function (r) { return /购买|平台|mercari|ebay|淘宝|闲鱼/i.test(r.category + r.name + r.url); });
+        var querySites = rows.filter(function (r) { return /查询|资料|discogs/i.test(r.category + r.name + r.url); });
+        var dups = [];
+        var urls = {};
         rows.forEach(function (r) { var u = (r.url || '').replace(/\/$/, ''); if (urls[u]) dups.push(r.name + ' 与 ' + urls[u]); else urls[u] = r.name; });
-        s += dups.length ? '发现重复：\n' + dups.join('\n') + '\n\n' : '无重复网站。\n\n';
-        s += '四、购买建议\n';
-        s += rows.filter(function (r) { return /购买|平台/i.test(r.category || ''); }).length ? '优先使用购买平台类网站比价，关注日本煤炉/Mercari 的低价黑胶。\n' : '建议添加黑胶购买平台网站（如 Mercari、eBay、闲鱼）。\n';
-        s += '\n五、查询建议\n';
-        s += '购买前务必在 Discogs 查询版本信息和市场参考价，避免购入高仿或高价。';
-        return s;
+        return aiFormat(
+          '黑胶网站收藏整理（共' + rows.length + '个）',
+          '收藏' + rows.length + '个网站，覆盖' + Object.keys(cats).length + '个分类。购买平台' + buySites.length + '个，资料查询' + querySites.length + '个。',
+          '网站丰富度：' + clamp(rows.length * 10, 0, 100) + '/100',
+          '· 覆盖购买/查询/资讯多维度\n· 分类：' + Object.keys(cats).map(function(c) { return c + '(' + cats[c] + ')'; }).join('、'),
+          (dups.length ? '· 发现重复：' + dups.join('；') : '· 无重复网站') + '\n· ' + (buySites.length < 2 ? '购买平台偏少' : '购买平台充足'),
+          buySites.length ? '优先使用购买平台比价，关注Mercari/eBay低价黑胶' : '建议添加购买平台网站（Mercari、eBay等）',
+          '· 购买前在Discogs查询版本信息\n· 定期清理重复网站\n· 补充资讯类网站获取行业动态'
+        );
       }
     },
     discogs: {
@@ -464,31 +534,27 @@
       collect: function (extra) { return Promise.resolve(extra || {}); },
       prompt: function (d) {
         return {
-          system: '你是黑胶收藏与交易专家。根据专辑信息分析收藏价值、版本稀缺程度、市场潜力，并给出适合收藏还是交易的建议。用中文，结构清晰。',
+          system: '你是黑胶收藏与交易专家。根据专辑信息分析：1.版本价值（首版价值、再版价值、限定版本价值）2.收藏价值（稀缺程度、收藏意义、长期价值）3.市场定位（适合收藏、适合出售、适合套利）。输出收藏价值评分、版本分析、购买建议。' + AI_FORMAT_SUFFIX,
           user: '专辑信息：\n' + JSON.stringify(d, null, 2)
         };
       },
       local: function (d) {
-        var s = '【专辑价值分析】\n\n';
-        s += '一、基础信息\n';
-        s += '· 专辑：' + (d.album || d.name || '-') + '\n· 歌手：' + (d.artist || '-') + '\n· 编号：' + (d.catalog || '-') + '\n';
-        s += '· 版本：' + (d.version || '-') + '\n· 年份：' + (d.year || '-') + '\n· 厂牌：' + (d.label || '-') + '\n· 国家：' + (d.country || '-') + '\n\n';
-        s += '二、版本稀缺程度\n';
         var v = (d.version || '').toLowerCase();
         var scarce = [];
         if (/limited|限量|numbered/.test(v)) scarce.push('限量版');
         if (/first|首版/.test(v)) scarce.push('首版');
-        if (/colou?r|picture|彩胶/.test(v)) scarce.push('彩胶/Picture Disc');
-        s += scarce.length ? '版本特征：' + scarce.join(' · ') + '\n稀缺度：' + (scarce.length >= 2 ? '高' : scarce.length === 1 ? '中' : '低') + '\n\n' : '普通版本，稀缺度低。\n\n';
-        s += '三、社区关注度\n';
-        s += '· want（想买人数）：' + (d.want || '-') + '\n· have（拥有人数）：' + (d.have || '-') + '\n· 在售数量：' + (d.numForSale || '-') + '\n';
-        s += d.want > 100 ? '海外需求旺盛。\n\n' : d.want > 30 ? '海外有一定需求。\n\n' : '海外需求一般或无数据。\n\n';
-        s += '四、市场潜力\n';
+        if (/colou?r|picture|彩胶/.test(v)) scarce.push('彩胶');
         var ratio = d.want && d.have ? d.want / d.have : 0;
-        s += ratio > 2 ? '需求远大于供给，升值潜力大。\n\n' : ratio > 1 ? '需求略大于供给，有一定潜力。\n\n' : '供需平衡或供大于求，升值空间有限。\n\n';
-        s += '五、收藏建议\n';
-        s += scarce.length >= 2 || ratio > 2 ? '推荐收藏。版本稀缺且市场需求旺盛，适合长期持有。' : scarce.length >= 1 || ratio > 1 ? '可收藏可交易。关注市场价格波动选择时机。' : '适合交易流转。普通版本收藏价值有限，关注利润空间即可。';
-        return s;
+        var collectScore = clamp((scarce.length * 25) + (ratio > 2 ? 30 : ratio > 1 ? 15 : 5) + (d.numForSale < 10 ? 15 : 5), 0, 100);
+        return aiFormat(
+          (d.artist || '-') + ' — ' + (d.album || d.name || '-') + '（' + (d.catalog || '-') + '）',
+          scarce.length >= 2 ? '版本稀缺度高，' + (ratio > 2 ? '市场需求旺盛，推荐收藏' : '有一定需求，可藏可交易') : '普通版本，' + (ratio > 1 ? '有需求但稀缺度一般' : '供需平衡，适合交易流转'),
+          '收藏价值：' + collectScore + '/100（' + (collectScore >= 75 ? '★★★★★' : collectScore >= 60 ? '★★★★☆' : collectScore >= 45 ? '★★★☆☆' : '★★☆☆☆') + '）',
+          (scarce.length ? '· 版本特征：' + scarce.join(' · ') + '\n' : '') + '· 社区关注度：want ' + (d.want || '-') + ' / have ' + (d.have || '-') + (ratio > 1 ? '\n· 需求大于供给' : ''),
+          (d.numForSale === 0 ? '· 在售0张，流动性风险' : '· 在售' + d.numForSale + '张') + '\n· ' + (scarce.length < 2 ? '版本稀缺度低，升值空间有限' : '稀缺但流通性需关注'),
+          scarce.length >= 2 || ratio > 2 ? '推荐收藏·长期持有' : scarce.length >= 1 || ratio > 1 ? '可收藏可交易，关注价格波动' : '适合交易流转，关注利润空间',
+          (scarce.length >= 2 ? '· 长期持有，等待升值\n' : '') + '· 可点击【进入黑胶全分析】做深度分析\n· 可点击【保存到库存】入库管理'
+        );
       }
     },
     auth: {
@@ -496,7 +562,7 @@
       collect: function (extra) { return Promise.resolve(extra || {}); },
       prompt: function (d) {
         return {
-          system: '你是黑胶鉴定专家。根据专辑信息、编号、版本、图片描述分析真实性，输出：编号匹配、版本一致性、包装情况、图片异常、可能风险、真实性参考评分（0-100）、风险等级、购买建议。注意：AI鉴定仅作为辅助参考。用中文。',
+          system: '你是黑胶鉴定专家。根据专辑信息、编号、版本、图片描述分析：1.编号是否匹配 2.版本是否一致 3.包装是否合理 4.图片是否存在异常。输出真实性参考评分（0-100分）、风险等级（低风险/中风险/高风险）、购买建议（建议购买/需要确认/谨慎购买）、购买检查清单。注意：AI鉴定仅作为辅助参考。' + AI_FORMAT_SUFFIX,
           user: '鉴定数据：\n' + JSON.stringify(d, null, 2)
         };
       },
@@ -505,24 +571,38 @@
         var score = 0;
         var weights = { catalogOk: 22, labelOk: 18, priceOk: 16, printOk: 16, sellerOk: 14, imgOk: 14 };
         checks.forEach(function (k) { score += weights[k] || 0; });
-        var level = score >= 90 ? '低风险（可信）' : score >= 70 ? '中风险（需确认）' : '高风险（谨慎）';
-        var advice = score >= 90 ? '推荐购买' : score >= 70 ? '谨慎购买，建议进一步核实版本细节' : '不建议购买，风险较高';
-        var s = '【AI辅助鉴定】\n\n';
-        s += '一、编号匹配\nCatalog: ' + (d.catalog || '-') + '，Matrix: ' + (d.matrix || '-') + '\n';
-        s += checks.indexOf('catalogOk') >= 0 ? '编号与官方一致 ✓\n\n' : '编号未确认或不一致 ✗\n\n';
-        s += '二、版本一致性\n';
-        s += checks.indexOf('labelOk') >= 0 ? '厂牌/版本/发行信息一致 ✓\n\n' : '版本信息未确认 ✗\n\n';
-        s += '三、包装情况\n';
-        s += checks.indexOf('printOk') >= 0 ? '封面/标签印刷正常 ✓\n\n' : '印刷存在异常或未确认 ✗\n\n';
-        s += '四、图片异常\n';
-        s += d.coverImg || d.sleeveImg || d.labelImg ? '已上传照片可供核对。\n\n' : '未上传照片，建议补充封面/外包装/标签照片。\n\n';
-        s += '五、可能风险\n';
-        if (checks.indexOf('priceOk') < 0) s += '· 价格可能异常偏低，警惕假货\n';
-        if (checks.indexOf('sellerOk') < 0) s += '· 卖家信誉未确认\n';
-        if (!d.coverImg) s += '· 缺少实物照片，无法核实真伪\n';
-        s += '\n六、真实性参考评分\n评分：' + score + '/100\n风险等级：' + level + '\n\n';
-        s += '七、购买建议\n' + advice + '\n\n⚠️ AI鉴定仅作为辅助参考，最终判断请以实物和专业鉴定为准。';
-        return s;
+        var level = score >= 90 ? '低风险' : score >= 70 ? '中风险' : '高风险';
+        var advice = score >= 90 ? '建议购买' : score >= 70 ? '需要确认' : '谨慎购买';
+        return aiFormat(
+          (d.album || d.catalog || '鉴定记录') + '（Catalog: ' + (d.catalog || '-') + '）',
+          '真实性参考评分 ' + score + '/100，' + level + '。' + advice + '。',
+          '真实性评分：' + score + '/100（' + level + '）',
+          checks.map(function(k) { return '· ' + ({catalogOk:'编号匹配',labelOk:'版本一致',priceOk:'价格正常',printOk:'印刷正常',sellerOk:'卖家信誉好',imgOk:'已上传照片'}[k] || k); }).join('\n') || '· 暂无通过项',
+          [!checks.length ? '· 未勾选任何核对项' : '', checks.indexOf('catalogOk') < 0 ? '· 编号未确认' : '', checks.indexOf('priceOk') < 0 ? '· 价格可能异常' : '', !d.coverImg ? '· 缺少实物照片' : ''].filter(Boolean).join('\n'),
+          advice + '。' + (score < 90 ? '建议补充核对项后再决定。' : '可放心采购。'),
+          '· ⚠️ AI鉴定仅辅助参考，最终以实物为准\n· 可点击【AI鉴定检查清单】获取完整检查项'
+        );
+      }
+    },
+    auth_checklist: {
+      label: 'AI鉴定检查清单',
+      collect: function (extra) { return Promise.resolve(extra || {}); },
+      prompt: function (d) {
+        return {
+          system: '你是黑胶鉴定专家。根据专辑信息生成购买前需要检查的完整清单，包括编号、包装、印刷、音质、卖家等方面。用中文，结构清晰。' + AI_FORMAT_SUFFIX,
+          user: '专辑信息：\n' + JSON.stringify(d, null, 2)
+        };
+      },
+      local: function (d) {
+        return aiFormat(
+          (d.album || d.catalog || '黑胶') + ' — 购买前检查清单',
+          '生成购买前必查清单，涵盖编号、包装、印刷、音质、卖家5大维度',
+          '完整度：100/100（5维度全覆盖）',
+          '· 覆盖核心鉴别点\n· 可逐项勾选核对\n· 降低购买风险',
+          '· 仍有主观判断成分\n· 部分项目需实物才能确认',
+          '逐项核对清单，全部通过后再购买',
+          '【编号检查】\n· Catalog Number与Discogs官方记录一致\n· Matrix/Runout编号与官方版本匹配\n· 条形码(ISBN/UPC)可查询\n\n【包装检查】\n· 封套印刷清晰无错版\n· 内页/歌词本完整\n· 封套颜色与官方版本一致\n· 塑料封膜完好（如有）\n\n【印刷检查】\n· 唱片标签印刷清晰\n· 中心孔位置准确\n· 无明显印刷偏移或重影\n\n【音质检查】\n· 唱片表面无明显划痕\n· 无 warp（翘曲）\n· 音轨间距均匀\n\n【卖家检查】\n· 卖家信誉评分>95%\n· 有实物照片（非官方图）\n· 价格在市场合理区间\n· 退换货政策明确'
+        );
       }
     },
     analysis: {
@@ -530,7 +610,7 @@
       collect: function (extra) { return Promise.resolve(extra || {}); },
       prompt: function (d) {
         return {
-          system: '你是黑胶采购决策专家。综合分析海外热度、中国市场热度、收藏价值、版本价值、市场需求、利润空间，输出0-100综合评分、评分等级、购买建议报告。用中文，结构清晰。',
+          system: '你是黑胶采购决策专家。综合分析以下5个维度：1.海外热度（海外收藏关注、市场需求、版本稀缺）2.中国热度（国内粉丝需求、社交平台讨论）3.收藏价值（歌手影响力、版本价值、发行年份）4.利润分析（预计利润=预售价格-购入价格，利润率=利润÷购入价格）5.风险分析（价格风险、市场风险、流通风险）。输出0-100综合评分，评分等级（90-100推荐采购/70-90可以考虑/70以下谨慎采购），最终建议（买入/观察/放弃）。' + AI_FORMAT_SUFFIX,
           user: '分析数据：\n' + JSON.stringify(d, null, 2)
         };
       },
@@ -538,42 +618,35 @@
         var buy = Number(d.buyPrice) || 0, sell = Number(d.presalePrice) || 0;
         var profit = sell - buy;
         var margin = buy > 0 ? profit / buy * 100 : 0;
-        var s = '【黑胶全分析】\n\n';
-        s += '一、基础信息\n· 名称：' + (d.name || '-') + '\n· 歌手：' + (d.artist || '-') + '\n· 编号：' + (d.catalog || '-') + '\n· 版本：' + (d.version || '-') + '\n\n';
-        s += '二、海外热度\n';
         var want = d.want || 0, have = d.have || 0, nfs = d.numForSale || 0;
-        s += 'want ' + want + ' / have ' + have + ' / 在售 ' + nfs + '\n';
         var overseas = want > 100 ? 80 : want > 50 ? 65 : want > 20 ? 50 : 40;
-        s += '海外热度：' + (overseas >= 75 ? '高' : overseas >= 60 ? '中' : '低') + '\n\n';
-        s += '三、中国热度\n（参考估算）基于海外热度与版本稀缺度推算\n';
         var china = Math.round(overseas * 0.82);
-        s += '中国热度：' + (china >= 75 ? '高' : china >= 60 ? '中' : '低') + '\n\n';
-        s += '四、收藏价值\n';
         var v = (d.version || '').toLowerCase();
         var cv = 60;
         if (/limited|限量/.test(v)) cv += 20;
         if (/first|首版/.test(v)) cv += 20;
         if (/colou?r|picture|彩胶/.test(v)) cv += 10;
         cv = Math.min(100, cv);
-        s += '收藏价值评分：' + cv + '/100\n\n';
-        s += '五、利润分析\n';
-        s += '采购成本：' + fmtMoney(buy) + '\n预计售价：' + fmtMoney(sell) + '\n预计利润：' + fmtMoney(profit) + '\n利润率：' + margin.toFixed(1) + '%\n\n';
-        s += '六、综合评分\n';
         var score = Math.round(overseas * 0.25 + china * 0.2 + cv * 0.25 + clamp(margin, 0, 100) * 0.3);
-        s += '综合评分：' + score + '/100\n';
-        s += score >= 90 ? '等级：强烈推荐\n' : score >= 75 ? '等级：推荐关注\n' : score >= 60 ? '等级：谨慎考虑\n' : '等级：不建议采购\n\n';
-        s += '七、购买建议\n';
-        s += score >= 75 ? '推荐购买。' : score >= 60 ? '谨慎购买。' : '不建议购买。';
-        s += '海外热度' + (overseas >= 75 ? '高' : '中等') + '，中国需求' + (china >= 75 ? '明显' : '一般') + '，利润率' + margin.toFixed(0) + '%。';
-        return s;
+        var level = score >= 90 ? '推荐采购' : score >= 70 ? '可以考虑' : '谨慎采购';
+        var advice = score >= 90 ? '买入' : score >= 70 ? '观察' : '放弃';
+        return aiFormat(
+          (d.name || '-') + ' — ' + (d.artist || '-'),
+          '综合评分' + score + '/100，等级：' + level + '。海外热度' + (overseas >= 75 ? '高' : overseas >= 60 ? '中' : '低') + '，中国热度' + (china >= 75 ? '高' : china >= 60 ? '中' : '低') + '，收藏价值' + cv + '/100，利润率' + margin.toFixed(1) + '%。最终建议：' + advice + '。',
+          '综合评分：' + score + '/100（' + level + '）',
+          '· 海外需求：want ' + want + ' / have ' + have + '\n· 版本价值：' + cv + '/100\n· 利润空间：' + (profit > 0 ? fmtMoney(profit) + '（' + margin.toFixed(1) + '%）' : '暂无利润数据'),
+          '· 在售数量：' + nfs + '张' + (nfs < 10 ? '（稀缺但流动性风险）' : '') + '\n· 中国市场认知度' + (china >= 75 ? '高' : '一般') + '\n· ' + (margin < 20 && buy > 0 ? '利润率偏低' : '利润空间尚可'),
+          advice + '。' + (score >= 90 ? '海外热度高+利润空间好，推荐采购。' : score >= 70 ? '有一定潜力但存在风险，建议观察。' : '综合表现不佳，建议放弃。'),
+          '· 可在Discogs查询更多版本信息\n· 可保存到库存管理\n· 持续关注市场价格波动'
+        );
       }
     },
     inventory: {
-      label: 'AI分析库存',
+      label: 'AI库存分析',
       collect: function () { return VHDB.getAll('inventory'); },
       prompt: function (d) {
         return {
-          system: '你是黑胶库存管理专家。分析库存数量、结构、热门歌手、滞销风险，输出：哪些优先销售、哪些适合长期收藏、哪些需要调整价格。用中文。',
+          system: '你是黑胶库存管理专家。分析库存数量、黑胶信息、购买价格，判断：1.哪些黑胶适合出售 2.哪些适合长期收藏 3.哪些库存风险较高。输出库存建议。' + AI_FORMAT_SUFFIX,
           user: '库存数据：\n' + JSON.stringify(d.map(function (r) { return { album: r.album, artist: r.artist, catalog: r.catalog, stockQty: r.stockQty, status: r.status, buyPrice: r.buyPrice, sellPrice: r.sellPrice }; }), null, 2)
         };
       },
@@ -581,54 +654,81 @@
         var total = rows.reduce(function (s, r) { return s + (Number(r.stockQty) || 0); }, 0);
         var onSale = rows.filter(function (r) { return r.status === '在售'; }).length;
         var sold = rows.filter(function (r) { return r.status === '已出售'; }).length;
-        var s = '【库存分析】\n\n';
-        s += '一、库存概况\n总库存：' + total + ' 张\n在售：' + onSale + ' · 已售：' + sold + ' · 品种数：' + rows.length + '\n\n';
-        s += '二、库存结构\n';
         var artists = {};
         rows.forEach(function (r) { var a = r.artist || '未知'; artists[a] = (artists[a] || 0) + (Number(r.stockQty) || 0); });
         var top = Object.keys(artists).sort(function (a, b) { return artists[b] - artists[a]; }).slice(0, 5);
-        s += '热门歌手（按库存量）：\n' + top.map(function (a) { return '· ' + a + '：' + artists[a] + ' 张'; }).join('\n') + '\n\n';
-        s += '三、滞销风险\n';
         var stale = rows.filter(function (r) { return r.status === '在售' && (Number(r.stockQty) || 0) > 3; });
-        s += stale.length ? '高库存待售项：\n' + stale.map(function (r) { return '· ' + (r.album || '-') + '（库存' + r.stockQty + '）'; }).join('\n') + '\n\n' : '无明显滞销风险。\n\n';
-        s += '四、建议\n';
-        s += '· 优先销售：高库存且在售时间长的专辑\n· 长期收藏：限量版/首版/彩胶版本\n· 调整价格：在售超过30天未成交的，建议降价5-10%';
-        return s;
+        return aiFormat(
+          '黑胶库存总览（' + rows.length + '个品种，' + total + '张）',
+          '总库存' + total + '张，在售' + onSale + '个，已售' + sold + '个。' + (stale.length ? '存在' + stale.length + '项高库存待售风险。' : '无明显滞销。') + '热门歌手：' + top.slice(0, 3).join('、'),
+          '库存健康度：' + clamp(100 - stale.length * 10, 30, 100) + '/100',
+          '· 品种数' + rows.length + '，库存' + total + '张\n· 热门歌手：\n' + top.map(function(a) { return '  ' + a + '（' + artists[a] + '张）'; }).join('\n'),
+          (stale.length ? '· 高库存待售：\n' + stale.slice(0, 3).map(function(r) { return '  ' + (r.name || '-') + '（库存' + r.stockQty + '）'; }).join('\n') : '· 无明显滞销风险') + '\n· ' + (onSale > rows.length * 0.7 ? '在售比例偏高，需加速销售' : '在售比例正常'),
+          '· 优先销售：高库存且在售时间长的专辑\n· 长期收藏：限量版/首版/彩胶版本\n· 调整价格：在售超30天未成交的降价5-10%',
+          '· 定期盘点库存周转率\n· 关注热门歌手的市场动态\n· 可点击【AI库存价值评估】查看库存总值'
+        );
+      }
+    },
+    inventory_value: {
+      label: 'AI库存价值评估',
+      collect: function () { return VHDB.getAll('inventory'); },
+      prompt: function (d) {
+        return {
+          system: '你是黑胶资产评估专家。计算：1.当前库存总价值 2.预计收益 3.资产结构。输出资金管理建议。' + AI_FORMAT_SUFFIX,
+          user: '库存数据：\n' + JSON.stringify(d, null, 2)
+        };
+      },
+      local: function (rows) {
+        var total = rows.reduce(function (s, r) { return s + (Number(r.stockQty) || 0); }, 0);
+        var buyTotal = rows.reduce(function (s, r) { return s + (Number(r.buyPrice) || 0) * (Number(r.stockQty) || 0); }, 0);
+        var sellEst = rows.reduce(function (s, r) { return s + (Number(r.sellPrice) || Number(r.buyPrice) || 0) * (Number(r.stockQty) || 0); }, 0);
+        var potentialProfit = sellEst - buyTotal;
+        var onSale = rows.filter(function (r) { return r.status === '在售'; });
+        var onSaleValue = onSale.reduce(function (s, r) { return s + (Number(r.buyPrice) || 0) * (Number(r.stockQty) || 0); }, 0);
+        return aiFormat(
+          '库存价值评估（' + rows.length + '个品种，' + total + '张）',
+          '库存采购总值' + fmtMoney(buyTotal) + '，预计售价总值' + fmtMoney(sellEst) + '，潜在利润' + fmtMoney(potentialProfit) + '。在售' + onSale.length + '个品种，在售采购值' + fmtMoney(onSaleValue) + '。',
+          '资产评分：' + clamp(potentialProfit > 0 ? 75 : 40, 0, 100) + '/100',
+          '· 库存总值：' + fmtMoney(sellEst) + '\n· 潜在利润：' + fmtMoney(potentialProfit) + '\n· 利润率：' + (buyTotal > 0 ? (potentialProfit / buyTotal * 100).toFixed(1) : '0') + '%',
+          '· 采购成本已投入' + fmtMoney(buyTotal) + '\n· ' + (onSale.length > rows.length * 0.7 ? '在售比例高，资金回笼压力大' : '在售比例正常') + '\n· ' + (potentialProfit < 0 ? '潜在亏损，需调整策略' : '有盈利空间但需实际成交'),
+          (potentialProfit > 0 ? '保持当前采购节奏，加速在售商品成交' : '减少低利润采购，优化库存结构') + '\n· 优先出售高价库存回笼资金',
+          '· 每月盘点库存价值变化\n· 关注高利润品种的采购机会\n· 控制采购资金不超过总资产的70%'
+        );
       }
     },
     hot: {
-      label: 'AI分析热点趋势',
+      label: 'AI热点分析',
       collect: function () {
         return VHDB.get('hot_topics', todayStr()).then(function (rec) {
-          return rec || { date: todayStr(), videos: [], accounts: [], audios: [] };
+          return rec || { date: todayStr(), videos: [], accounts: [], audios: [], platformGroups: {} };
         });
       },
       prompt: function (d) {
         return {
-          system: '你是社交媒体与黑胶市场分析师。分析热点视频、热门账号、热门音频，判断为什么爆火、是否与黑胶市场相关、是否存在商业机会。用中文。',
-          user: '今日热点数据：\n' + JSON.stringify(d, null, 2)
+          system: '你是社交媒体与黑胶市场分析师。分析各平台热点趋势（抖音、小红书、B站、微博、YouTube、音乐趋势），判断：1.哪些歌手热度上涨 2.哪些音乐可能影响黑胶市场 3.哪些热点值得关注。输出今日黑胶机会（如某动漫OST热度上涨可能带动实体唱片需求）。' + AI_FORMAT_SUFFIX,
+          user: '今日热点数据（按平台分组）：\n' + JSON.stringify(d, null, 2)
         };
       },
       local: function (d) {
         var vids = d.videos || [], accs = d.accounts || [], auds = d.audios || [];
-        var s = '【热点趋势分析】\n\n';
-        s += '一、热门视频（' + vids.length + ' 个）\n';
-        s += vids.slice(0, 5).map(function (v) { return '· ' + (v.title || '-') + '（赞' + (v.likes || '-') + '）'; }).join('\n') + '\n';
-        var musicVids = vids.filter(function (v) { return /音乐|黑胶|唱片|歌手|band|jazz|rock|pop/i.test(v.title + v.reason); });
-        s += musicVids.length ? '\n与黑胶相关视频：' + musicVids.length + ' 个\n' : '\n暂无明显黑胶相关视频\n';
-        s += '\n二、热门账号（' + accs.length + ' 个）\n';
-        s += accs.slice(0, 3).map(function (a) { return '· ' + (a.author || '-') + '（' + (a.dir || '') + '）'; }).join('\n') + '\n\n';
-        s += '三、热门音频（' + auds.length + ' 个）\n';
-        s += auds.slice(0, 5).map(function (a) { return '· ' + (a.name || '-') + ' — ' + (a.singer || '-'); }).join('\n') + '\n\n';
-        s += '四、商业机会\n';
-        s += musicVids.length ? '· 发现黑胶相关热点，可关注相关艺人唱片的采购机会\n' : '· 今日热点与黑胶关联度低\n';
-        s += auds.length ? '· 热门音频可能带动相关艺人唱片需求，建议关注\n' : '';
-        s += '\n五、建议\n持续关注音乐类热点，及时采购热点相关黑胶唱片。';
-        return s;
+        var groups = d.platformGroups || {};
+        var groupText = Object.keys(groups).map(function(p) {
+          return groups[p].label + '：' + groups[p].items.length + '条';
+        }).join(' / ') || '无分组数据';
+        var musicVids = vids.filter(function (v) { return /音乐|黑胶|唱片|歌手|band|jazz|rock|pop|mv|演唱会/i.test(v.title + v.reason); });
+        return aiFormat(
+          '每日热点趋势分析（' + todayStr() + '）',
+          '共采集' + vids.length + '条热搜，覆盖' + Object.keys(groups).length + '个平台。' + (musicVids.length ? '发现' + musicVids.length + '条音乐相关热点，存在黑胶市场机会。' : '今日热点与黑胶关联度较低。'),
+          '市场机会评分：' + clamp(musicVids.length * 15 + Object.keys(groups).length * 10, 0, 100) + '/100',
+          '· 热门视频' + vids.length + '条\n· 热门音频' + auds.length + '条\n· ' + (musicVids.length ? '音乐相关：\n' + musicVids.slice(0, 3).map(function(v) { return '  ' + v.title; }).join('\n') : '音乐相关热点暂无'),
+          '· 热点变化快，时效性有限\n· ' + (musicVids.length < 2 ? '音乐类热点不足，市场信号弱' : '需进一步验证热点与黑胶的关联度'),
+          musicVids.length ? '关注热点相关艺人唱片，及时采购' : '持续监控各平台音乐类热点，等待机会',
+          '· 定期采集热搜数据\n· 关注热门音频可能带动的唱片需求\n· 将热点信息与黑胶全分析结合做决策'
+        );
       }
     },
     musicnews: {
-      label: 'AI分析音乐趋势',
+      label: 'AI音乐趋势分析',
       collect: function () {
         return VHDB.get('music_news', todayStr()).then(function (rec) {
           return (rec && rec.items) ? rec.items : [];
@@ -636,28 +736,27 @@
       },
       prompt: function (d) {
         return {
-          system: '你是音乐产业与黑胶投资分析师。分析新专辑/新歌/黑胶发行趋势，输出：哪些艺人值得关注、哪些黑胶可能升值、哪些值得提前布局。用中文。',
-          user: '今日音乐资讯：\n' + JSON.stringify(d, null, 2)
+          system: '你是音乐产业与黑胶投资分析师。分析新专辑/新歌/黑胶发行趋势，输出：1.哪些歌手值得关注 2.哪些专辑值得提前布局 3.哪些可能成为收藏热门。输出关注名单。' + AI_FORMAT_SUFFIX,
+          user: '今日音乐资讯（全网·海内外）：\n' + JSON.stringify(d, null, 2)
         };
       },
       local: function (items) {
-        var s = '【音乐趋势分析】\n\n';
-        s += '一、今日发行概况\n共 ' + items.length + ' 条新发行。\n';
         var vinyl = items.filter(function (it) { return /黑胶|vinyl/i.test(it.format || ''); });
-        s += '其中黑胶发行：' + vinyl.length + ' 张\n\n';
-        s += '二、地区分布\n';
         var regions = {};
         items.forEach(function (it) { var r = it.region || '其他'; regions[r] = (regions[r] || 0) + 1; });
-        Object.keys(regions).forEach(function (r) { s += '· ' + r + '：' + regions[r] + '\n'; });
-        s += '\n三、值得关注的艺人\n';
         var artists = {};
         items.forEach(function (it) { var a = it.artist || '未知'; artists[a] = (artists[a] || 0) + 1; });
         var topArtists = Object.keys(artists).sort(function (a, b) { return artists[b] - artists[a]; }).slice(0, 5);
-        s += topArtists.map(function (a) { return '· ' + a + '（' + artists[a] + ' 张发行）'; }).join('\n') + '\n\n';
-        s += '四、可能升值的黑胶\n';
-        s += vinyl.length ? vinyl.slice(0, 5).map(function (v) { return '· ' + (v.artist || '-') + ' — ' + (v.album || '-'); }).join('\n') : '今日暂无黑胶发行。';
-        s += '\n\n五、提前布局建议\n关注日本和欧美的黑胶首发，首版/限量版通常升值潜力最大。';
-        return s;
+        var priced = items.filter(function (it) { return it.presalePrice; });
+        return aiFormat(
+          '音乐趋势分析（全网·海内外，' + items.length + '条新发行）',
+          '今日新发行' + items.length + '条，其中黑胶' + vinyl.length + '张。地区分布：' + Object.keys(regions).map(function(r) { return r + '(' + regions[r] + ')'; }).join('、') + '。值得关注的艺人：' + topArtists.slice(0, 3).join('、'),
+          '投资价值评分：' + clamp(vinyl.length * 10 + priced.length * 5, 0, 100) + '/100',
+          '· 新发行' + items.length + '条（黑胶' + vinyl.length + '张）\n· 热门艺人：\n' + topArtists.map(function(a) { return '  ' + a + '（' + artists[a] + '张）'; }).join('\n') + (priced.length ? '\n· 含预售价格' + priced.length + '条' : ''),
+          '· ' + (vinyl.length < 3 ? '黑胶发行偏少，投资机会有限' : '黑胶发行活跃但需筛选') + '\n· 海内外价格差异需验证\n· 部分艺人知名度需确认',
+          vinyl.length ? '关注日本/欧美黑胶首发，首版/限量版升值潜力最大：\n' + vinyl.slice(0, 3).map(function(v) { return '  ' + (v.artist || '-') + ' — ' + (v.album || '-'); }).join('\n') : '今日无黑胶发行，持续关注',
+          '· 建立关注名单，跟踪艺人发行节奏\n· 对比海内外预售价格差异\n· 将高潜力专辑加入黑胶全分析'
+        );
       }
     },
     fx: {
@@ -669,35 +768,30 @@
       },
       prompt: function (d) {
         return {
-          system: '你是外汇与黑胶采购成本分析师。分析当前汇率变化对日本/香港采购的影响、对利润的影响，输出采购建议。用中文。',
+          system: '你是外汇与黑胶采购成本分析师。分析当前汇率变化对日本/香港采购的影响、对利润的影响，输出采购建议。' + AI_FORMAT_SUFFIX,
           user: '今日汇率数据：\n' + JSON.stringify(d, null, 2)
         };
       },
       local: function (d) {
         var r = d.rates || {};
-        var s = '【汇率采购影响分析】\n\n';
-        s += '一、当前汇率（1外币=?人民币）\n';
-        ['JPY', 'HKD', 'USD', 'EUR', 'GBP', 'KRW', 'TWD'].forEach(function (c) {
-          if (r[c]) s += '· ' + c + '：¥' + r[c].toFixed(4) + '\n';
-        });
-        s += '\n二、日本采购影响\n';
-        s += r.JPY ? '当前日元汇率 ¥' + r.JPY.toFixed(4) + '/日元。\n' : '无日元数据。\n';
-        s += r.JPY && r.JPY < 0.05 ? '日元处于低位，是采购日本黑胶的好时机。\n\n' : '日元汇率中等，按需采购即可。\n\n';
-        s += '三、香港采购影响\n';
-        s += r.HKD ? '当前港币汇率 ¥' + r.HKD.toFixed(4) + '/港币。\n' : '无港币数据。\n';
-        s += '\n四、利润影响\n';
-        s += '汇率波动直接影响采购成本。日元每降1%，日本黑胶采购成本降低约1%，利润率相应提升。\n\n';
-        s += '五、采购建议\n';
-        s += r.JPY && r.JPY < 0.05 ? '· 建议加大日本黑胶采购\n· 关注 Mercari/煤炉 低价黑胶' : '· 按需采购，控制库存\n· 关注汇率走势择机下单';
-        return s;
+        var jpyLow = r.JPY && r.JPY < 0.05;
+        return aiFormat(
+          '汇率采购影响分析（' + (d.date || todayStr()) + '）',
+          (r.JPY ? '日元¥' + r.JPY.toFixed(4) + '，' : '') + (jpyLow ? '日元低位，适合日本采购。' : '日元中等，按需采购。') + (r.HKD ? '港币¥' + r.HKD.toFixed(4) + '。' : ''),
+          '采购时机评分：' + (jpyLow ? 85 : 60) + '/100',
+          '· 日元：¥' + (r.JPY ? r.JPY.toFixed(4) : '-') + '/JPY\n· 港币：¥' + (r.HKD ? r.HKD.toFixed(4) : '-') + '/HKD\n· ' + (jpyLow ? '日元处于低位，采购成本优势明显' : '汇率中等，无特别优势'),
+          '· 汇率波动直接影响采购成本\n· ' + (jpyLow ? '日元可能继续波动' : '日元无优势，采购成本偏高') + '\n· 需关注汇率趋势择机下单',
+          jpyLow ? '建议加大日本黑胶采购，关注Mercari/煤炉低价黑胶' : '按需采购，控制库存，关注汇率走势',
+          '· 每日更新汇率数据\n· 大额采购前确认汇率\n· 利用汇率换算工具计算成本'
+        );
       }
     },
     expense: {
-      label: 'AI分析消费',
+      label: 'AI消费分析',
       collect: function () { return VHDB.getAll('expenses'); },
       prompt: function (d) {
         return {
-          system: '你是财务分析师。分析黑胶生意的消费趋势、采购投入、运营成本，输出资金管理建议。用中文。',
+          system: '你是财务分析师。分析黑胶生意的资金使用情况：1.黑胶投入金额 2.采购成本 3.运营支出。输出资金使用建议（如近期采购投入过高需要控制低利润商品采购）。' + AI_FORMAT_SUFFIX,
           user: '消费记录：\n' + JSON.stringify(d, null, 2)
         };
       },
@@ -705,52 +799,46 @@
         var total = rows.reduce(function (s, r) { return s + (Number(r.amount) || 0); }, 0);
         var month = monthStr();
         var monthTotal = rows.filter(function (r) { return (r.date || '').slice(0, 7) === month; }).reduce(function (s, r) { return s + (Number(r.amount) || 0); }, 0);
-        var s = '【消费分析】\n\n';
-        s += '一、消费概况\n总消费：' + fmtMoney(total) + '\n本月消费：' + fmtMoney(monthTotal) + '\n记录数：' + rows.length + '\n\n';
-        s += '二、消费趋势\n';
-        var byMonth = {};
-        rows.forEach(function (r) { var m = (r.date || '').slice(0, 7); byMonth[m] = (byMonth[m] || 0) + (Number(r.amount) || 0); });
-        Object.keys(byMonth).sort().slice(-6).forEach(function (m) { s += '· ' + m + '：' + fmtMoney(byMonth[m]) + '\n'; });
-        s += '\n三、采购投入\n';
         var purchases = rows.filter(function (r) { return /采购|黑胶|唱片|进货/i.test(r.note || ''); });
         var purchaseTotal = purchases.reduce(function (s2, r) { return s2 + (Number(r.amount) || 0); }, 0);
-        s += '采购相关支出：' + fmtMoney(purchaseTotal) + '（' + purchases.length + ' 笔）\n';
-        s += '占比：' + (total > 0 ? (purchaseTotal / total * 100).toFixed(1) : 0) + '%\n\n';
-        s += '四、资金管理建议\n';
-        s += '· 采购支出占比' + (total > 0 ? (purchaseTotal / total * 100).toFixed(0) : 0) + '%，';
-        s += purchaseTotal / total > 0.7 ? '偏高，注意控制采购节奏\n' : '合理，保持平衡\n';
-        s += '· 建议每月预留20%资金作为周转\n· 关注单品利润率，淘汰低利润品类';
-        return s;
+        var purchaseRatio = total > 0 ? purchaseTotal / total * 100 : 0;
+        return aiFormat(
+          '资金分析（总消费' + fmtMoney(total) + '，' + rows.length + '笔）',
+          '总消费' + fmtMoney(total) + '，本月' + fmtMoney(monthTotal) + '。采购占比' + purchaseRatio.toFixed(1) + '%，' + (purchaseRatio > 70 ? '偏高需控制。' : '合理。'),
+          '资金健康度：' + clamp(100 - (purchaseRatio > 70 ? 30 : 0), 50, 100) + '/100',
+          '· 记录' + rows.length + '笔\n· 本月消费' + fmtMoney(monthTotal) + '\n· 采购投入' + fmtMoney(purchaseTotal) + '（' + purchases.length + '笔）',
+          '· 采购占比' + purchaseRatio.toFixed(0) + '%，' + (purchaseRatio > 70 ? '偏高' : '正常') + '\n· ' + (monthTotal > total * 0.3 ? '本月消费集中' : '消费分散') + '\n· 需预留周转资金',
+          (purchaseRatio > 70 ? '建议减少低利润采购，控制采购节奏' : '保持当前资金管理节奏') + '\n· 每月预留20%资金作为周转\n· 关注单品利润率',
+          '· 每月复盘消费结构\n· 区分采购/运营/个人消费\n· 建立利润率淘汰机制'
+        );
       }
     },
     crm: {
-      label: 'AI分析客户',
+      label: 'AI客户分析',
       collect: function () { return VHDB.getAll('crm'); },
       prompt: function (d) {
         return {
-          system: '你是客户关系管理专家。分析客户喜好、购买趋势、推荐商品，输出客户维护建议。用中文。',
+          system: '你是客户关系管理专家。分析客户：1.客户喜好 2.消费能力 3.推荐方向。输出客户维护建议（如该客户偏好KPOP限定黑胶，可推荐韩国限定发行）。' + AI_FORMAT_SUFFIX,
           user: 'CRM数据：\n' + JSON.stringify(d.map(function (r) { return { name: r.name, contact: r.contact, purchases: r.purchases, note: r.note }; }), null, 2)
         };
       },
       local: function (rows) {
-        var s = '【客户分析】\n\n';
-        s += '一、客户概况\n客户总数：' + rows.length + '\n';
         var withPurchases = rows.filter(function (r) { return r.purchases && r.purchases.length; });
-        s += '有购买记录：' + withPurchases.length + '\n\n';
-        s += '二、客户喜好\n';
         var artists = {};
         withPurchases.forEach(function (r) {
           (r.purchases || []).forEach(function (p) { var a = p.artist || '未知'; artists[a] = (artists[a] || 0) + 1; });
         });
         var top = Object.keys(artists).sort(function (a, b) { return artists[b] - artists[a]; }).slice(0, 5);
-        s += top.length ? top.map(function (a) { return '· ' + a + '（' + artists[a] + ' 次）'; }).join('\n') : '暂无足够数据';
-        s += '\n\n三、购买趋势\n';
-        var totalPurchases = withPurchases.reduce(function (s2, r) { return s2 + (r.purchases || []).length; }, 0);
-        s += '总购买次数：' + totalPurchases + '\n';
-        s += totalPurchases > 0 ? '平均每位客户购买 ' + (totalPurchases / withPurchases.length).toFixed(1) + ' 次\n\n' : '\n\n';
-        s += '四、客户维护建议\n';
-        s += '· 对有购买记录的客户定期推送新品上架通知\n· 关注高频购买客户，提供优先选购权\n· 对未购买的客户，推荐热门入门级黑胶';
-        return s;
+        var totalPurchases = withPurchases.reduce(function (s, r) { return s + (r.purchases || []).length; }, 0);
+        return aiFormat(
+          '客户分析（' + rows.length + '位客户，' + withPurchases.length + '位有购买记录）',
+          '客户' + rows.length + '位，有购买记录' + withPurchases.length + '位。总购买' + totalPurchases + '次，' + (withPurchases.length ? '人均' + (totalPurchases / withPurchases.length).toFixed(1) + '次。' : '暂无购买数据。') + '热门歌手：' + (top.slice(0, 3).join('、') || '暂无'),
+          '客户活跃度：' + clamp(withPurchases.length * 20 + totalPurchases * 5, 0, 100) + '/100',
+          '· 客户' + rows.length + '位\n· 有购买记录' + withPurchases.length + '位\n· ' + (top.length ? '热门偏好：\n' + top.map(function(a) { return '  ' + a + '（' + artists[a] + '次）'; }).join('\n') : '暂无偏好数据'),
+          '· ' + (rows.length - withPurchases.length) + '位客户无购买记录\n· ' + (withPurchases.length < rows.length * 0.5 ? '客户转化率偏低' : '客户转化率正常') + '\n· 客户偏好数据可能不完整',
+          '· 对有购买记录的客户定期推送新品\n· 关注高频购买客户，提供优先选购权\n· 对未购买客户推荐热门入门黑胶',
+          '· 完善客户偏好信息\n· 建立客户分级管理\n· 定期回访高频客户'
+        );
       }
     }
   };
@@ -999,7 +1087,8 @@
       '<div class="mod-actions"><button class="btn btn-primary" id="addBtn">＋ 新建鉴定</button></div></div>' +
       '<div class="hint">本助手「不自动识别图片、不自动扫描图片」。请人工核对后勾选检查项并上传照片，系统生成<b>真实性参考评分（100分制）</b>与风险等级。</div>' +
       '<div class="form-wrap hidden" id="formWrap"></div>' +
-      '<div class="list-wrap" id="listWrap"><div class="empty">加载中…</div></div>' + aiSectionHTML('auth') + '</div>');
+      '<div class="list-wrap" id="listWrap"><div class="empty">加载中…</div></div>' +
+      aiSectionHTML('auth') + aiSectionHTML('auth_checklist') + '</div>');
     var listWrap = node.querySelector('#listWrap');
     var formWrap = node.querySelector('#formWrap');
     var editingId = null;
@@ -1088,6 +1177,16 @@
     node.querySelector('#addBtn').onclick = function () { editingId = null; buildForm({}); };
     node._refresh = refresh;
     bindAI(node, 'auth');
+    bindAI(node, 'auth_checklist', function() {
+      var selected = null;
+      // 获取最近一条鉴定记录作为上下文
+      return VHDB.getAll('auth_records').then(function(rows) {
+        if (rows.length) {
+          return rows.sort(function(a,b) { return (b.createdAt||'').localeCompare(a.createdAt||''); })[0];
+        }
+        return {};
+      });
+    });
     return { node: node, refresh: refresh };
   }
 
@@ -1156,31 +1255,97 @@
 
   // 每日热点
   function buildHot() {
+    var PLATFORM_META = {
+      weibo: { label: '微博', color: '#e6162d', icon: '📺' },
+      douyin: { label: '抖音', color: '#161823', icon: '🎵' },
+      bilibili: { label: 'B站', color: '#fb7299', icon: '🎮' },
+      xiaohongshu: { label: '小红书', color: '#ff2442', icon: '📕' }
+    };
     var node = elFrom('<div class="module"><div class="mod-head"><h2>每日热点</h2>' +
       '<div class="mod-actions">' +
       '<button class="btn btn-collect" id="cHot">🔥 采集今日热点</button>' +
-      '<button class="btn btn-collect" id="cVideo">🎬 采集抖音热门视频</button>' +
+      '<button class="btn btn-collect" id="cVideo">🎬 采集热门视频</button>' +
       '<button class="btn btn-collect" id="cAudio">🎧 采集热门音频</button>' +
       '</div></div>' +
-      '<div class="hint">重点抖音热点。未配置数据源时，可使用下方表单手动添加。</div>' +
+      '<div class="hint">数据来源：Cloudflare Worker（微博/抖音/B站/小红书热搜）。3个按钮均采集每平台最热门的前5条，按平台自动分组展示。也可手动添加。</div>' +
       '<details class="form-wrap"><summary style="cursor:pointer;font-weight:600">＋ 手动添加视频</summary>' +
       '<form id="vForm" style="margin-top:10px"><div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">' +
       '<label>视频标题<input name="title"></label><label>视频链接<input name="link"></label>' +
       '<label>作者名字<input name="author"></label><label>账号名称<input name="account"></label>' +
       '<label>账号主页<input name="homepage"></label><label>点赞数量<input name="likes"></label>' +
-      '<label>评论数量<input name="comments"></label></div>' +
+      '<label>评论数量<input name="comments"></label>' +
+      '<label>所属平台<select name="platform"><option value="">未指定</option>' +
+      Object.keys(PLATFORM_META).map(function(p) { return '<option value="' + p + '">' + PLATFORM_META[p].icon + ' ' + PLATFORM_META[p].label + '</option>'; }).join('') +
+      '</select></label></div>' +
       '<label class="full" style="display:flex;flex-direction:column;gap:5px;margin-top:8px">爆火原因<textarea name="reason"></textarea></label>' +
       '<div class="form-btns"><button class="btn btn-primary">添加</button></div></form></details>' +
-      '<div class="section-title">热门视频</div><div id="vList" class="list"></div>' +
+      '<div class="section-title">按平台分组</div><div id="pGroupList"></div>' +
+      '<div class="section-title">全部热门视频</div><div id="vList" class="list"></div>' +
       '<div class="section-title">每日筛选 · 3 个热门账号</div><div id="aList" class="list"></div>' +
       '<div class="section-title">热门音频</div><div id="auList" class="list"></div>' + aiSectionHTML('hot') + '</div>');
 
     function refresh() {
       VHDB.get('hot_topics', todayStr()).then(function (rec) {
-        rec = rec || { videos: [], accounts: [], audios: [] };
+        rec = rec || { videos: [], accounts: [], audios: [], platformGroups: {} };
         var videos = rec.videos || [], accounts = rec.accounts || [], audios = rec.audios || [];
+        var groups = rec.platformGroups || {};
+
+        // 按平台分组展示
+        var pGroupEl = node.querySelector('#pGroupList');
+        var groupKeys = Object.keys(groups);
+        if (groupKeys.length) {
+          pGroupEl.innerHTML = groupKeys.map(function (p) {
+            var meta = PLATFORM_META[p] || { label: groups[p].label || p, color: '#888', icon: '📌' };
+            var items = groups[p].items || [];
+            return '<div class="platform-group-card" style="border-left:4px solid ' + meta.color + ';margin-bottom:14px;border-radius:8px;overflow:hidden">' +
+              '<div class="platform-group-header" style="background:var(--bg-2);padding:10px 14px;display:flex;align-items:center;gap:8px">' +
+              '<span style="font-size:1.2em">' + meta.icon + '</span>' +
+              '<b style="color:' + meta.color + '">' + esc(meta.label) + '</b>' +
+              '<span class="tag" style="margin-left:auto">' + items.length + '条热搜</span></div>' +
+              '<div style="padding:4px 0">' + items.map(function (item, idx) {
+                return '<div class="item" style="padding:8px 14px;border-bottom:1px solid var(--line)">' +
+                  '<div class="body" style="display:flex;gap:10px;align-items:center">' +
+                  '<span style="font-size:1.1em;font-weight:700;color:' + meta.color + ';min-width:28px">#' + (idx + 1) + '</span>' +
+                  '<div style="flex:1"><b>' + esc(item.title) + '</b>' +
+                  '<div class="meta">' + esc(item.reason || '') + '</div></div></div></div>';
+              }).join('') + '</div></div>';
+          }).join('');
+        } else {
+          // 没有分组数据，尝试从 videos 的 platform 字段重建分组
+          var regrouped = {};
+          videos.forEach(function (v) {
+            var p = v.platform || 'other';
+            if (!regrouped[p]) regrouped[p] = { label: (PLATFORM_META[p] || {}).label || v.account || p, items: [] };
+            regrouped[p].items.push(v);
+          });
+          var rKeys = Object.keys(regrouped);
+          if (rKeys.length && rKeys.some(function(k) { return k !== 'other'; })) {
+            pGroupEl.innerHTML = rKeys.filter(function(k) { return k !== 'other'; }).map(function (p) {
+              var meta = PLATFORM_META[p] || { label: regrouped[p].label, color: '#888', icon: '📌' };
+              var items = regrouped[p].items;
+              return '<div class="platform-group-card" style="border-left:4px solid ' + meta.color + ';margin-bottom:14px;border-radius:8px;overflow:hidden">' +
+                '<div class="platform-group-header" style="background:var(--bg-2);padding:10px 14px;display:flex;align-items:center;gap:8px">' +
+                '<span style="font-size:1.2em">' + meta.icon + '</span>' +
+                '<b style="color:' + meta.color + '">' + esc(meta.label) + '</b>' +
+                '<span class="tag" style="margin-left:auto">' + items.length + '条热搜</span></div>' +
+                '<div style="padding:4px 0">' + items.map(function (item, idx) {
+                  return '<div class="item" style="padding:8px 14px;border-bottom:1px solid var(--line)">' +
+                    '<div class="body" style="display:flex;gap:10px;align-items:center">' +
+                    '<span style="font-size:1.1em;font-weight:700;color:' + meta.color + ';min-width:28px">#' + (idx + 1) + '</span>' +
+                    '<div style="flex:1"><b>' + esc(item.title) + '</b>' +
+                    '<div class="meta">' + esc(item.reason || '') + '</div></div></div></div>';
+                }).join('') + '</div></div>';
+            }).join('');
+          } else {
+            pGroupEl.innerHTML = '<div class="empty">暂无分组数据，点击「采集」获取</div>';
+          }
+        }
+
+        // 全部视频列表
         node.querySelector('#vList').innerHTML = videos.length ? videos.map(function (v) {
-          return '<div class="item"><div class="body"><b>' + esc(v.title) + '</b>' +
+          var pMeta = v.platform ? PLATFORM_META[v.platform] : null;
+          var pTag = pMeta ? '<span class="tag" style="border-color:' + pMeta.color + ';color:' + pMeta.color + '">' + pMeta.icon + ' ' + pMeta.label + '</span>' : '';
+          return '<div class="item"><div class="body"><b>' + esc(v.title) + '</b> ' + pTag +
             '<div class="meta">' + esc([v.author, v.account].filter(Boolean).join(' · ')) + '</div>' +
             '<div class="meta">👍 ' + esc(v.likes) + ' · 💬 ' + esc(v.comments) + '</div>' +
             '<div class="meta">爆火原因：' + esc(v.reason) + '</div>' +
@@ -1189,23 +1354,27 @@
             '</div></div>';
         }).join('') : '<div class="empty">暂无，点击「采集」或手动添加</div>';
         node.querySelector('#aList').innerHTML = accounts.length ? accounts.slice(0, 3).map(function (a) {
-          return '<div class="item"><div class="body"><b>' + esc(a.author) + '</b> <span class="tag">' + esc(a.account) + '</span>' +
+          var pMeta = a.platform ? PLATFORM_META[a.platform] : null;
+          var pTag = pMeta ? '<span class="tag" style="border-color:' + pMeta.color + ';color:' + pMeta.color + '">' + pMeta.icon + ' ' + pMeta.label + '</span>' : '';
+          return '<div class="item"><div class="body"><b>' + esc(a.author) + '</b> ' + pTag +
             '<div class="meta">内容方向：' + esc(a.dir) + '</div></div></div>';
         }).join('') : '<div class="empty">暂无</div>';
         node.querySelector('#auList').innerHTML = audios.length ? audios.map(function (a) {
-          return '<div class="item"><div class="body"><b>' + esc(a.name) + '</b> — ' + esc(a.singer) +
+          var pMeta = a.platform ? PLATFORM_META[a.platform] : null;
+          var pTag = pMeta ? '<span class="tag" style="border-color:' + pMeta.color + ';color:' + pMeta.color + '">' + pMeta.icon + ' ' + pMeta.label + '</span>' : '';
+          return '<div class="item"><div class="body"><b>' + esc(a.name) + '</b> ' + pTag +
             '<div class="meta">使用情况：' + esc(a.usage) + ' · 热门原因：' + esc(a.reason) + '</div></div></div>';
         }).join('') : '<div class="empty">暂无</div>';
       });
     }
-    ['cHot', 'cVideo'].forEach(function (id) {
-      node.querySelector('#' + id).onclick = function () { collectHot().then(refresh).catch(function (e) { toast('采集失败：' + e.message, 'err'); refresh(); }); };
-    });
+    node.querySelector('#cHot').onclick = function () { collectHot().then(refresh).catch(function (e) { toast('采集失败：' + e.message, 'err'); refresh(); }); };
+    node.querySelector('#cVideo').onclick = function () { collectHot().then(refresh).catch(function (e) { toast('采集失败：' + e.message, 'err'); refresh(); }); };
     node.querySelector('#cAudio').onclick = function () { collectAudio().then(refresh).catch(function (e) { toast('采集失败：' + e.message, 'err'); refresh(); }); };
     node.querySelector('#vForm').onsubmit = function (e) {
       e.preventDefault(); var f = e.target; var v = {
         title: f.title.value, link: f.link.value, author: f.author.value, account: f.account.value,
-        homepage: f.homepage.value, likes: f.likes.value, comments: f.comments.value, reason: f.reason.value
+        homepage: f.homepage.value, likes: f.likes.value, comments: f.comments.value, reason: f.reason.value,
+        platform: f.platform.value
       };
       VHDB.get('hot_topics', todayStr()).then(function (rec) {
         rec = rec || { date: todayStr(), accounts: [], audios: [] };
@@ -1221,15 +1390,16 @@
   // 音乐新信息
   function buildMusicNews() {
     var node = elFrom('<div class="module"><div class="mod-head"><h2>音乐新信息</h2>' +
-      '<div class="mod-actions"><button class="btn btn-collect" id="cNews">🎵 采集全球音乐资讯</button></div></div>' +
-      '<div class="hint">默认使用 <b>MusicBrainz</b> 全球发行库（免费 · 免 Key · 支持 CORS，覆盖多地区）；点「采集」即取今日新发行。你也可在「系统设置」填入自定义资讯源 JSON 覆盖。</div>' +
+      '<div class="mod-actions"><button class="btn btn-collect" id="cNews">🎵 采集全网音乐资讯</button></div></div>' +
+      '<div class="hint">数据来源：<b>MusicBrainz + iTunes</b>（全网·海内外覆盖，含预售价格）。经 Cloudflare Worker 代理访问。点「采集」即取今日新发行。也可手动添加。</div>' +
       '<details class="form-wrap"><summary style="cursor:pointer;font-weight:600">＋ 手动添加资讯</summary>' +
       '<form id="nForm" style="margin-top:10px"><div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">' +
-      '<label>地区<select name="region"><option>日本</option><option>韩国</option><option>美国</option><option>欧洲</option><option>中国港台</option></select></label>' +
+      '<label>地区<select name="region"><option>日本</option><option>韩国</option><option>美国</option><option>欧洲</option><option>中国港台</option><option>中国内地</option><option>其他</option></select></label>' +
       '<label>歌手<input name="artist"></label><label>专辑<input name="album"></label>' +
       '<label>发布时间<input name="releaseDate"></label><label>格式<select name="format"><option>CD</option><option>黑胶</option><option>数字</option></select></label>' +
-      '<label>售价<input name="price"></label><label>出版公司<input name="company"></label>' +
-      '<label>出版国家<input name="country"></label><label>购买链接<input name="buyLink"></label>' +
+      '<label>售价<input name="price"></label><label>预售价格<input name="presalePrice"></label>' +
+      '<label>出版公司<input name="company"></label><label>出版国家<input name="country"></label>' +
+      '<label>购买链接<input name="buyLink"></label><label>来源<input name="source" placeholder="MusicBrainz / iTunes / 自定义"></label>' +
       '<label class="full">来源链接<input name="srcLink"></label></div>' +
       '<div class="form-btns"><button class="btn btn-primary">添加</button></div></form></details>' +
       '<div id="nList" class="list"></div>' + aiSectionHTML('musicnews') + '</div>');
@@ -1244,7 +1414,9 @@
           return '<div class="item"><div class="body" style="display:flex;gap:10px;align-items:flex-start">' + thumb +
             '<div style="flex:1"><b>' + esc(it.artist) + '</b> — ' + esc(it.album) +
             ' <span class="tag">' + esc(it.region) + '</span> <span class="tag">' + esc(it.format) + '</span>' +
-            '<div class="meta">发布：' + esc(it.releaseDate) + ' · 售价：' + esc(it.price) + ' · ' + esc(it.company) + ' / ' + esc(it.country) + '</div>' +
+            (it.source ? ' <span class="tag">' + esc(it.source) + '</span>' : '') +
+            '<div class="meta">发布：' + esc(it.releaseDate) + ' · 售价：' + esc(it.price || '—') + ' · 预售价格：' + esc(it.presalePrice || '—') + '</div>' +
+            '<div class="meta">' + esc(it.company || '') + (it.country ? ' / ' + esc(it.country) : '') + '</div>' +
             '<div class="meta">' + (it.buyLink ? '<a href="' + esc(it.buyLink) + '" target="_blank" rel="noopener">购买</a> ' : '') + (it.srcLink ? '<a href="' + esc(it.srcLink) + '" target="_blank" rel="noopener">来源</a>' : '') + '</div>' +
             '</div></div></div>';
         }).join('') : '<div class="empty">暂无，点击「采集」或手动添加</div>';
@@ -1254,7 +1426,8 @@
     node.querySelector('#nForm').onsubmit = function (e) {
       e.preventDefault(); var f = e.target; var it = {
         region: f.region.value, artist: f.artist.value, album: f.album.value, releaseDate: f.releaseDate.value,
-        format: f.format.value, price: f.price.value, company: f.company.value, country: f.country.value,
+        format: f.format.value, price: f.price.value, presalePrice: f.presalePrice.value,
+        company: f.company.value, country: f.country.value, source: f.source.value,
         buyLink: f.buyLink.value, srcLink: f.srcLink.value
       };
       VHDB.get('music_news', todayStr()).then(function (rec) {
@@ -1268,17 +1441,20 @@
     return { node: node, refresh: refresh };
   }
 
-  // 实时汇率（含汇率换算）
+  // 实时汇率（含双向汇率换算）
   function buildFx() {
-    var CUR = ['USD', 'HKD', 'TWD', 'JPY', 'KRW', 'GBP', 'EUR'];
-    var LABELS = { USD: '美元', HKD: '港币', TWD: '台币', JPY: '日元', KRW: '韩元', GBP: '英镑', EUR: '欧元' };
+    var CUR = ['CNY', 'USD', 'HKD', 'TWD', 'JPY', 'KRW', 'GBP', 'EUR'];
+    var LABELS = { CNY: '人民币', USD: '美元', HKD: '港币', TWD: '台币', JPY: '日元', KRW: '韩元', GBP: '英镑', EUR: '欧元' };
     var node = elFrom('<div class="module"><div class="mod-head"><h2>实时汇率</h2>' +
       '<div class="mod-actions"><button class="btn btn-collect" id="cFx">💲 更新今日汇率</button></div></div>' +
-      '<div class="hint">显示 1 单位外币兑换多少人民币（CNY）。数据永久保存，可查看历史。下方支持汇率换算。</div>' +
+      '<div class="hint">显示 1 单位外币兑换多少人民币（CNY）。数据永久保存，可查看历史。下方支持任意两种货币双向换算。</div>' +
       '<div class="card"><h3>汇率换算</h3>' +
-      '<div class="conv-row"><input type="number" id="convAmt" placeholder="金额" step="any">' +
-      '<select id="convCur">' + CUR.map(function (c) { return '<option value="' + c + '">' + (LABELS[c] || c) + ' (' + c + ')</option>'; }).join('') + '</select>' +
-      '<button class="btn btn-primary" id="convBtn">换算 → CNY</button></div>' +
+      '<div class="conv-row">' +
+      '<input type="number" id="convAmt" placeholder="金额" step="any">' +
+      '<select id="convFrom">' + CUR.map(function (c) { return '<option value="' + c + '"' + (c === 'CNY' ? ' selected' : '') + '>' + (LABELS[c] || c) + ' (' + c + ')</option>'; }).join('') + '</select>' +
+      '<span style="font-size:1.4em;color:var(--accent)">⇄</span>' +
+      '<select id="convTo">' + CUR.map(function (c) { return '<option value="' + c + '"' + (c === 'USD' ? ' selected' : '') + '>' + (LABELS[c] || c) + ' (' + c + ')</option>'; }).join('') + '</select>' +
+      '<button class="btn btn-primary" id="convBtn">换算</button></div>' +
       '<div id="convRes" class="score-big"></div></div>' +
       '<div id="fxToday" class="dash-grid" style="margin-top:14px"></div>' +
       '<div class="section-title">历史汇率</div><div id="fxHist" class="list"></div>' + aiSectionHTML('fx') + '</div>');
@@ -1303,12 +1479,24 @@
     node.querySelector('#cFx').onclick = function () { collectFx().then(refresh).catch(function (e) { toast('更新失败：' + e.message, 'err'); }); };
     node.querySelector('#convBtn').onclick = function () {
       var amt = Number(node.querySelector('#convAmt').value);
-      var cur = node.querySelector('#convCur').value;
+      var fromCur = node.querySelector('#convFrom').value;
+      var toCur = node.querySelector('#convTo').value;
       if (!amt) { toast('请输入金额', 'err'); return; }
+      if (fromCur === toCur) {
+        node.querySelector('#convRes').textContent = amt + ' ' + fromCur + ' = ' + amt + ' ' + toCur;
+        return;
+      }
       VHDB.get('exchange_rates', todayStr()).then(function (rec) {
-        if (!rec || !rec.rates || !rec.rates[cur]) { toast('请先更新今日汇率', 'err'); return; }
-        var cny = amt * rec.rates[cur];
-        node.querySelector('#convRes').textContent = fmtMoney(cny) + '  (1 ' + cur + ' = ' + Number(rec.rates[cur]).toFixed(4) + ' CNY)';
+        if (!rec || !rec.rates) { toast('请先更新今日汇率', 'err'); return; }
+        // rates[c] = 1外币 = ?人民币。CNY 的 rate 视为 1。
+        var fromRate = fromCur === 'CNY' ? 1 : rec.rates[fromCur];
+        var toRate = toCur === 'CNY' ? 1 : rec.rates[toCur];
+        if (!fromRate || !toRate) { toast('缺少 ' + (!fromRate ? fromCur : toCur) + ' 汇率数据', 'err'); return; }
+        // 换算：先把 from 转成 CNY，再从 CNY 转成 to
+        var cny = amt * fromRate;
+        var result = cny / toRate;
+        var rateText = '1 ' + fromCur + ' = ' + (fromRate / toRate).toFixed(4) + ' ' + toCur;
+        node.querySelector('#convRes').textContent = amt + ' ' + fromCur + ' = ' + result.toFixed(2) + ' ' + toCur + '  (' + rateText + ')';
       });
     };
     node._refresh = refresh;
@@ -1481,12 +1669,12 @@
       '<label class="full" style="display:flex;flex-direction:column;gap:5px;margin-bottom:10px">Discogs 代理地址（可选，解决浏览器跨域；Cloudflare Worker 等，留空走直连）<input name="discogsProxy" placeholder="https://你的worker.dev"></label>' +
       '<label class="full" style="display:flex;flex-direction:column;gap:5px;margin-bottom:10px">中国热搜代理地址（可选，用于黑胶全分析的中国热度。部署 Cloudflare Worker 转发微博/抖音热搜，留空则中国热度使用本地估算）<input name="chinaHotProxy" placeholder="https://你的热搜worker.dev"></label>' +
       '<label class="full" style="display:flex;flex-direction:column;gap:5px;margin-bottom:10px">AI分析代理地址（可选，用于全局AI分析。部署 Cloudflare Worker 代理调 DeepSeek 等，Key 存 Worker 端不泄露。留空则所有AI分析走本地确定性算法，不消耗Token）<input name="aiProxyUrl" placeholder="https://你的worker.dev/ai-analyze"></label>' +
-      '<label class="full" style="display:flex;flex-direction:column;gap:5px;margin-bottom:10px">音乐资讯源（返回 JSON 数组或 {items:[...]} 的 URL）<input name="musicNewsSource"></label>' +
-      '<label class="full" style="display:flex;flex-direction:column;gap:5px;margin-bottom:10px">抖音热点源（返回 {videos:[...],accounts:[...]} 的 URL）<input name="hotTopicSource"></label>' +
-      '<label class="full" style="display:flex;flex-direction:column;gap:5px;margin-bottom:10px">热门音频源（返回数组或 {audios:[...]} 的 URL）<input name="audioSource"></label>' +
+      '<label class="full" style="display:flex;flex-direction:column;gap:5px;margin-bottom:10px">音乐资讯源（可选，留空则通过 Worker 代理 MusicBrainz。填入则用自定义 JSON 源）<input name="musicNewsSource"></label>' +
+      '<label class="full" style="display:flex;flex-direction:column;gap:5px;margin-bottom:10px">抖音热点源（可选，留空则通过 Worker 热搜采集。填入则用自定义 URL）<input name="hotTopicSource"></label>' +
+      '<label class="full" style="display:flex;flex-direction:column;gap:5px;margin-bottom:10px">热门音频源（可选，留空则通过 Worker 热搜采集。填入则用自定义 URL）<input name="audioSource"></label>' +
       '<div class="form-btns"><button type="submit" class="btn btn-primary">保存设置</button></div>' +
       '</form></div>' +
-      '<div class="hint">未配置数据源时，各采集按钮会提示手动添加；手动录入始终是可靠主路径。汇率接口为免费公共服务，无需配置即可使用。</div></div>');
+      '<div class="hint">热搜代理和 AI 分析代理已默认填入 Worker 地址，开箱即用。音乐资讯（全网·海内外，含预售价格）/热点/音频采集均通过 Worker 代理获取数据，无需额外配置。汇率接口为免费公共服务，无需配置。Discogs 查询需自行申请 Token。</div></div>');
     VHDB.getConfig().then(function (cfg) {
       var f = node.querySelector('#cfgForm');
       ['displayName', 'theme', 'discogsToken', 'discogsProxy', 'chinaHotProxy', 'aiProxyUrl', 'musicNewsSource', 'hotTopicSource', 'audioSource'].forEach(function (k) {
@@ -1591,8 +1779,38 @@
       var overseaHtml = '<div class="card"><h3>二、海外热度分析</h3>' + levelBadge(r.overseasHot) +
         '<div class="meta">数据来源：Discogs 社区（海外收藏关注频率）</div>' +
         '<p class="reason">' + esc(r.overseasText) + '</p></div>';
-      var chinaHtml = '<div class="card"><h3>三、中国市场热度分析</h3>' + levelBadge(r.chinaHot) +
+      // 中国热度：分平台展示（4平台，无闲鱼）
+      var platformLabels = { weibo:'微博', douyin:'抖音', bilibili:'B站', xiaohongshu:'小红书' };
+      var platformColors = { weibo:'#e6162d', douyin:'#161823', bilibili:'#fb7299', xiaohongshu:'#ff2442' };
+      var platformOrder = ['weibo','douyin','bilibili','xiaohongshu'];
+      var platformHtml = '';
+      if (r.chinaPlatforms && Object.keys(r.chinaPlatforms).length) {
+        platformHtml = '<div class="platform-grid">';
+        platformOrder.forEach(function (p) {
+          var pd = r.chinaPlatforms[p];
+          if (!pd) { return; }
+          var hasHits = pd.hits && pd.hits.length;
+          var color = platformColors[p] || '#888';
+          platformHtml += '<div class="platform-item' + (hasHits ? ' platform-hit' : '') + '">' +
+            '<div class="platform-name" style="border-left:3px solid ' + color + '">' +
+            '<span class="platform-dot" style="background:' + color + '"></span>' +
+            esc(platformLabels[p] || p) +
+            '<span class="platform-count">搜索' + (pd.total || 0) + '次</span></div>' +
+            (hasHits
+              ? '<div class="platform-matched">命中：' + pd.hits.map(esc).join('、') + '</div>'
+              : '<div class="platform-nomatch">未命中</div>') +
+            (pd.sample && pd.sample.length
+              ? '<details class="platform-details"><summary>查看热搜词</summary><div class="platform-words">' +
+                pd.sample.map(function (w) { return '<span class="hot-word">' + esc(w) + '</span>'; }).join('') +
+                '</div></details>'
+              : '') +
+            '</div>';
+        });
+        platformHtml += '</div>';
+      }
+      var chinaHtml = '<div class="card"><h3>三、中国市场热度分析（4平台分采）</h3>' + levelBadge(r.chinaHot) +
         '<div class="meta">数据来源：' + esc(r.chinaSource || '参考估算') + '</div>' +
+        platformHtml +
         '<p class="reason">' + esc(r.chinaText) + '</p></div>';
       var scoreHtml = '<div class="card score-card"><h3>四、黑胶价值评分</h3>' +
         '<div class="big-score">' + r.score + '<small>/100</small></div>' +
@@ -1650,8 +1868,8 @@
         return VHAPI.fetchChinaHotWords(cfg.chinaHotProxy).catch(function (err) {
           toast('热搜数据获取失败，使用估算：' + err.message, 'err'); return null;
         });
-      }).then(function (words) {
-        analyzeVinyl(rec, words);
+      }).then(function (hotData) {
+        analyzeVinyl(rec, hotData);
         rec.status = 'done';
         rec.analyzedAt = new Date().toISOString();
         if (!rec.createdAt) rec.createdAt = rec.analyzedAt;
@@ -1852,7 +2070,8 @@
       '<input type="search" id="iSearch" placeholder="搜索名称 / 歌手 / Catalog" style="padding:9px 10px;border-radius:8px;border:1px solid var(--line);background:var(--bg-2);color:var(--text);width:260px">' +
       '<select id="iFilter"><option value="">全部状态</option>' + STATUS.map(function (s) { return '<option>' + s + '</option>'; }).join('') + '</select></div>' +
       '<div class="form-wrap hidden" id="formWrap"></div>' +
-      '<div class="list-wrap" id="listWrap"><div class="empty">加载中…</div></div>' + aiSectionHTML('inventory') + '</div>');
+      '<div class="list-wrap" id="listWrap"><div class="empty">加载中…</div></div>' +
+      aiSectionHTML('inventory') + aiSectionHTML('inventory_value') + '</div>');
     var listWrap = node.querySelector('#listWrap');
     var formWrap = node.querySelector('#formWrap');
     var search = node.querySelector('#iSearch');
@@ -1968,6 +2187,7 @@
     filter.onchange = refresh;
     node._refresh = refresh;
     bindAI(node, 'inventory');
+    bindAI(node, 'inventory_value');
     return { node: node, refresh: refresh };
   }
 

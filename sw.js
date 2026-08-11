@@ -4,16 +4,16 @@
  * 更新策略：network-first（网络优先，离线时回退缓存）。
  * 这样每次部署/本地改动后，刷新一次即可拿到最新文件，不会卡在旧缓存。
  */
-var CACHE = 'vinyl-hunter-os-v3';
+var CACHE = 'vinyl-hunter-os-v8';
 var SHELL = [
   './',
   './index.html',
   './manifest.json',
   './icon.svg',
-  './assets/css/style.css?v=3',
-  './assets/js/db.js?v=3',
-  './assets/js/api.js?v=3',
-  './assets/js/app.js?v=3'
+  './assets/css/style.css?v=8',
+  './assets/js/db.js?v=8',
+  './assets/js/api.js?v=8',
+  './assets/js/app.js?v=8'
 ];
 
 self.addEventListener('install', function (e) {
