@@ -355,6 +355,7 @@
     fetchJson: fetchJson,
     fetchMusicBrainzNews: fetchMusicBrainzNews,
     fetchHotTopics: fetchHotTopics,
+    fetchPlatformHot: fetchPlatformHot,
     fetchChinaHotWords: fetchChinaHotWords,
     fetchAIAnalysis: fetchAIAnalysis,
     fetchDouyinVideos: fetchDouyinVideos,

@@ -528,14 +528,6 @@ body.has-custom-bg::before {
 .bg-prev { margin-top: 8px; }
 .bg-prev img { max-width: 220px; border-radius: 8px; box-shadow: var(--shadow); }
 
-/* ---------- AI 使用次数小角标（各模块标题右侧） ---------- */
-.ai-count-badge {
-  display: inline-block; margin-left: 10px; padding: 2px 9px;
-  font-size: 12px; font-weight: 600; border-radius: 20px;
-  background: var(--accent-2); color: #fff; vertical-align: middle;
-  letter-spacing: .3px;
-}
-
 /* ---------- AI 使用记录模块 --- 占比条 ---------- */
 .mini-bar { height: 8px; background: var(--bg-2); border-radius: 6px; margin-top: 6px; overflow: hidden; }
 .mini-bar-fill { height: 100%; background: linear-gradient(90deg, var(--accent), var(--accent-2)); transition: width .3s; }

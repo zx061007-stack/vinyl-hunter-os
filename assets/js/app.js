@@ -843,7 +843,6 @@
     if (!btn) return;
     btn.onclick = function () { runAI(mid, resultEl, histEl, getExtra); };
     loadAIHistory(histEl, mid);
-    ensureAICounterBadge(node, mid);
   }
 
   // 执行 AI 分析
@@ -949,7 +948,6 @@
     return VHDB.get('ai_usage', mid).then(function (rec) {
       var next = rec ? (rec.count || 0) + 1 : 1;
       return VHDB.put('ai_usage', { mid: mid, count: next, lastUsed: new Date().toISOString() }).then(function () {
-        updateAICounterBadge(mid, next);
         return next;
       });
     });
@@ -964,24 +962,6 @@
       return map;
     });
   }
-  // 在模块 mod-head 内渲染/更新「AI 使用 N 次」小角标
-  function ensureAICounterBadge(node, mid) {
-    var head = node.querySelector('.mod-head');
-    if (!head) return;
-    var badge = head.querySelector('.ai-count-badge');
-    if (!badge) {
-      badge = elFrom('<span class="ai-count-badge" title="本模块 AI 功能已使用次数">🤖 0</span>');
-      head.appendChild(badge);
-    }
-    badge.dataset.mid = mid;
-    getAIUsage(mid).then(function (n) { badge.textContent = '🤖 ' + n; });
-  }
-  function updateAICounterBadge(mid, n) {
-    $$('.ai-count-badge').forEach(function (b) {
-      if (b.dataset.mid === mid) b.textContent = '🤖 ' + n;
-    });
-  }
-
   /* ---------------- 通用清空按钮 ----------------
    * 给任意模块的 mod-actions 区追加一个「清空」按钮，用于清除该模块已采集/已录入的数据，
    * 避免数据堆积。clearFn 执行实际清空逻辑。
@@ -1432,7 +1412,6 @@
     };
     node._refresh = refresh;
     bindAI(node, 'hot');
-    ensureAICounterBadge(node, 'hot');
     return { node: node, refresh: refresh };
   }
 
@@ -1927,7 +1906,7 @@
         '<span class="tag ' + adviceCls + ' big-tag">' + esc(r.advice) + '</span>' +
         '<p class="reason">' + esc(r.reason) + '</p></div>';
       // 七、AI 深度分析：在专辑信息内单独展示「AI分析」（普通分析见上方六张卡片）
-      var aiCardHtml = '<div class="card ai-album-card"><h3>七、AI 深度分析 <span class="ai-count-badge" data-mid="analysis">🤖 0</span></h3>' +
+      var aiCardHtml = '<div class="card ai-album-card"><h3>七、AI 深度分析</h3>' +
         '<p class="reason">由 AI（DeepSeek）针对本张专辑做综合研判，与上方「普通分析」互补。未配置 AI 代理时走本地确定性算法，不消耗 Token。</p>' +
         '<button class="btn btn-ai" id="albumAiBtn">🤖 让 AI 分析这张专辑</button>' +
         '<div class="ai-result hidden" id="albumAiResult"></div></div>';
@@ -2007,7 +1986,6 @@
     };
     node._refresh = refresh; refresh();
     addClearButton(node, '🗑 清空分析', function () { return VHDB.clear('full_analysis'); });
-    ensureAICounterBadge(node, 'analysis');
     return { node: node, refresh: refresh };
   }
 
