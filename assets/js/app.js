@@ -94,6 +94,25 @@
       });
     });
   }
+  // 单平台实时热搜采集（抖音/小红书/微博/B站），供「每日热点」与「数据采集中心」共用
+  var PLATFORM_LABELS = { douyin: '抖音', xiaohongshu: '小红书', weibo: '微博', bilibili: 'B站' };
+  function collectOnePlatform(p) {
+    return VHDB.getConfig().then(function (cfg) {
+      if (!cfg.chinaHotProxy) { toast('未配置代理地址（系统设置→中国热搜代理）', 'err'); return; }
+      return VHAPI.fetchPlatformHot(cfg.chinaHotProxy, p).then(function (data) {
+        return VHDB.get('hot_topics', todayStr()).then(function (rec) {
+          rec = rec || { date: todayStr(), platforms: {} };
+          if (!rec.platforms) rec.platforms = {};
+          rec.platforms[p] = (data.words || []).map(function (w) { return String(w); });
+          rec.date = todayStr();
+          rec['updated_' + p] = data.updatedAt || Date.now();
+          return VHDB.put('hot_topics', rec).then(function () {
+            toast((PLATFORM_LABELS[p] || p) + '已采集 ' + (data.words || []).length + ' 条实时热点', 'ok');
+          });
+        });
+      });
+    });
+  }
   // 平台 App 跳转链接（工作台内一键跳转到该平台 App 查看）
   function platformAppLink(platform, keyword) {
     var q = encodeURIComponent(keyword || '');
@@ -1072,9 +1091,10 @@
       { label: '更新今日汇率', fn: collectFx },
       { label: '查询 Discogs 黑胶资料', fn: function () { showView('discogs'); } },
       { label: '采集全球音乐资讯', fn: collectMusicNews },
-      { label: '采集 4 平台实时热搜', fn: collectHot },
-      { label: '采集抖音热门视频', fn: collectVideo },
-      { label: '采集抖音热门音乐', fn: collectAudio }
+      { label: '采集抖音实时热点', fn: function () { return collectOnePlatform('douyin'); } },
+      { label: '采集小红书实时热点', fn: function () { return collectOnePlatform('xiaohongshu'); } },
+      { label: '采集微博实时热点', fn: function () { return collectOnePlatform('weibo'); } },
+      { label: '采集 B站实时热点', fn: function () { return collectOnePlatform('bilibili'); } }
     ];
     var node = elFrom('<div class="module"><h2>数据采集中心</h2>' +
       '<div class="hint">所有数据均需你主动点击按钮才会采集，<b>不会自动联网</b>，以节省 Token / API 额度。未配置数据源时，请在各模块使用「新增」手动录入。</div>' +
@@ -1365,22 +1385,9 @@
       var btn = node.querySelector('[data-pbtn="' + p + '"]');
       var old = btn ? btn.textContent : '';
       if (btn) { btn.disabled = true; btn.textContent = '采集中…'; }
-      return VHDB.getConfig().then(function (cfg) {
-        if (!cfg.chinaHotProxy) { toast('未配置代理地址（系统设置→中国热搜代理）', 'err'); return; }
-        return VHAPI.fetchPlatformHot(cfg.chinaHotProxy, p).then(function (data) {
-          return VHDB.get('hot_topics', todayStr()).then(function (rec) {
-            rec = rec || { date: todayStr(), platforms: {} };
-            if (!rec.platforms) rec.platforms = {};
-            rec.platforms[p] = (data.words || []).map(function (w) { return String(w); });
-            rec.date = todayStr();
-            rec['updated_' + p] = data.updatedAt || Date.now();
-            return VHDB.put('hot_topics', rec).then(function () {
-              toast(PLATFORM_META[p].label + '已采集 ' + (data.words || []).length + ' 条实时热点', 'ok');
-            });
-          });
-        });
-      }).then(function () { if (btn) { btn.disabled = false; btn.textContent = old; } refresh(); })
-        .catch(function (e) { if (btn) { btn.disabled = false; btn.textContent = old; } toast('采集失败：' + e.message, 'err'); refresh(); });
+      return collectOnePlatform(p)
+        .then(function () { if (btn) { btn.disabled = false; btn.textContent = old; } refresh(); })
+        .catch(function (e) { if (btn) { btn.disabled = false; btn.textContent = old; } toast('采集失败：' + (e && e.message), 'err'); refresh(); });
     }
 
     function refresh() {
@@ -2461,7 +2468,7 @@
     };
     var node = elFrom('<div class="module"><div class="mod-head"><h2>📈 AI 使用记录</h2>' +
       '<div class="mod-actions"><button class="btn btn-danger" id="resetAi">🗑 清零统计</button></div></div>' +
-      '<div class="hint">记录各模块累计调用 AI 分析的次数（含本地确定性算法与远程 AI）。每次点击 AI 分析按钮都会 +1。各模块标题右侧也有实时小角标。</div>' +
+      '<div class="hint">记录各模块累计调用 AI 分析的次数（含本地确定性算法与远程 AI）。每次点击 AI 分析按钮都会 +1。</div>' +
       '<div id="aiTotal" class="dash-grid" style="margin:12px 0"></div>' +
       '<div class="section-title">各模块明细</div><div id="aiList"><div class="empty">加载中…</div></div></div>');
     var totalEl = node.querySelector('#aiTotal');
