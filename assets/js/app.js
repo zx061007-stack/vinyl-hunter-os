@@ -95,49 +95,74 @@
   }
   function collectHot() {
     return VHDB.getConfig().then(function (cfg) {
-      // 优先用用户自定义源，否则用 Worker 热搜代理
-      if (cfg.hotTopicSource) {
-        return VHAPI.fetchJson(cfg.hotTopicSource).then(function (data) {
-          var rec = { date: todayStr(), videos: data.videos || [], accounts: data.accounts || [], audios: data.audios || [] };
-          return VHDB.put('hot_topics', rec).then(function () { toast('今日热点已采集', 'ok'); });
-        });
-      }
-      if (cfg.chinaHotProxy) {
+      if (!cfg.chinaHotProxy) { toast('未配置代理地址（系统设置→中国热搜代理）', 'err'); return; }
+      // 热搜组：4 平台实时热搜，按平台分组。保留已采集的视频/音频（分开采集，互不覆盖）
+      return VHDB.get('hot_topics', todayStr()).then(function (prev) {
         return VHAPI.fetchHotTopics(cfg.chinaHotProxy).then(function (data) {
-          var rec = { date: todayStr(), videos: data.videos || [], accounts: data.accounts || [], audios: data.audios || [], platformGroups: data.platformGroups || {} };
+          var rec = {
+            date: todayStr(),
+            hotSearch: { platformGroups: data.platformGroups || {}, videos: data.videos || [], accounts: data.accounts || [] },
+            videos: (prev && prev.videos) || [],
+            audios: (prev && prev.audios) || []
+          };
           return VHDB.put('hot_topics', rec).then(function () {
-            toast('已采集 ' + rec.videos.length + ' 条热搜（每平台前5）', 'ok');
+            toast('已采集 4 平台实时热搜（' + (data.videos || []).length + ' 条）', 'ok');
           });
         });
-      }
-      toast('未配置数据源，请在系统设置配置或使用手动添加', 'err');
+      });
+    });
+  }
+  function collectVideo() {
+    return VHDB.getConfig().then(function (cfg) {
+      if (!cfg.chinaHotProxy) { toast('未配置代理地址（系统设置→中国热搜代理）', 'err'); return; }
+      // 视频组：仅抖音实时高播放视频
+      return VHAPI.fetchDouyinVideos(cfg.chinaHotProxy).then(function (items) {
+        return VHDB.get('hot_topics', todayStr()).then(function (rec) {
+          rec = rec || { date: todayStr(), hotSearch: {}, videos: [], audios: [] };
+          rec.videos = items;
+          return VHDB.put('hot_topics', rec).then(function () {
+            toast('已采集抖音实时视频热点 ' + items.length + ' 条', 'ok');
+          });
+        });
+      });
     });
   }
   function collectAudio() {
     return VHDB.getConfig().then(function (cfg) {
-      // 优先用用户自定义源，否则用 Worker 热搜代理
-      if (cfg.audioSource) {
-        return VHAPI.fetchJson(cfg.audioSource).then(function (data) {
-          var audios = Array.isArray(data) ? data : (data.audios || []);
-          return VHDB.get('hot_topics', todayStr()).then(function (rec) {
-            rec = rec || { date: todayStr(), videos: [], accounts: [] };
-            rec.audios = audios;
-            return VHDB.put('hot_topics', rec).then(function () { toast('热门音频已采集', 'ok'); });
+      if (!cfg.chinaHotProxy) { toast('未配置代理地址（系统设置→中国热搜代理）', 'err'); return; }
+      // 音频组：仅抖音实时高频使用音频
+      return VHAPI.fetchDouyinMusic(cfg.chinaHotProxy).then(function (items) {
+        return VHDB.get('hot_topics', todayStr()).then(function (rec) {
+          rec = rec || { date: todayStr(), hotSearch: {}, videos: [], audios: [] };
+          rec.audios = items;
+          return VHDB.put('hot_topics', rec).then(function () {
+            toast('已采集抖音实时音乐热点 ' + items.length + ' 条', 'ok');
           });
         });
-      }
-      if (cfg.chinaHotProxy) {
-        return VHAPI.fetchHotTopics(cfg.chinaHotProxy).then(function (data) {
-          var audios = data.audios || [];
-          return VHDB.get('hot_topics', todayStr()).then(function (rec) {
-            rec = rec || { date: todayStr(), videos: [], accounts: [] };
-            rec.audios = audios;
-            return VHDB.put('hot_topics', rec).then(function () { toast('已采集 ' + audios.length + ' 条热门音频（每平台前5）', 'ok'); });
-          });
-        });
-      }
-      toast('未配置数据源，请在系统设置配置或使用手动添加', 'err');
+      });
     });
+  }
+
+  // 平台 App 跳转链接（工作台内一键跳转到该平台 App 查看）
+  function platformAppLink(platform, keyword) {
+    var q = encodeURIComponent(keyword || '');
+    var map = {
+      weibo: 'sinaweibo://search/all?q=' + q,
+      douyin: 'snssdk1128://search?keyword=' + q,
+      bilibili: 'bilibili://search?keyword=' + q,
+      xiaohongshu: 'xhsdiscover://search/result?keyword=' + q
+    };
+    return map[platform] || '';
+  }
+  function platformWebLink(platform, keyword) {
+    var q = encodeURIComponent(keyword || '');
+    var map = {
+      weibo: 'https://s.weibo.com/weibo?q=' + q,
+      douyin: 'https://www.douyin.com/search/' + q,
+      bilibili: 'https://search.bilibili.com/all?keyword=' + q,
+      xiaohongshu: 'https://www.xiaohongshu.com/search_result?keyword=' + q
+    };
+    return map[platform] || '';
   }
 
   /* ---------------- 通用记录管理组件 ---------------- */
@@ -248,6 +273,9 @@
       };
     }
     node.querySelector('#addBtn').onclick = function () { editingId = null; buildForm({}); };
+
+    // 清空按钮：清除本模块全部录入数据（不删其他模块）
+    addClearButton(node, '🗑 清空', function () { return VHDB.clear(cfg.store); });
 
     if (cfg.ai) bindAI(node, cfg.ai);
     return { node: node, refresh: refresh };
@@ -963,6 +991,24 @@
     });
   }
 
+  /* ---------------- 通用清空按钮 ----------------
+   * 给任意模块的 mod-actions 区追加一个「清空」按钮，用于清除该模块已采集/已录入的数据，
+   * 避免数据堆积。clearFn 执行实际清空逻辑。
+   */
+  function addClearButton(node, label, clearFn) {
+    var actions = node.querySelector('.mod-actions') || node.querySelector('.mod-head');
+    if (!actions) return;
+    var btn = elFrom('<button class="btn btn-danger">' + (label || '🗑 清空') + '</button>');
+    btn.onclick = function () {
+      if (!confirm('确认清空该模块的数据？此操作不可撤销。')) return;
+      Promise.resolve(clearFn()).then(function () {
+        toast('已清空', 'ok');
+        if (node._refresh) node._refresh();
+      }).catch(function (e) { toast('清空失败：' + e.message, 'err'); });
+    };
+    actions.appendChild(btn);
+  }
+
   /* ---------------- 自定义模块 ---------------- */
 
   // 首页驾驶舱（新指标）
@@ -1055,8 +1101,9 @@
       { label: '更新今日汇率', fn: collectFx },
       { label: '查询 Discogs 黑胶资料', fn: function () { showView('discogs'); } },
       { label: '采集全球音乐资讯', fn: collectMusicNews },
-      { label: '采集今日热点', fn: collectHot },
-      { label: '采集热门音频', fn: collectAudio }
+      { label: '采集 4 平台实时热搜', fn: collectHot },
+      { label: '采集抖音热门视频', fn: collectVideo },
+      { label: '采集抖音热门音乐', fn: collectAudio }
     ];
     var node = elFrom('<div class="module"><h2>数据采集中心</h2>' +
       '<div class="hint">所有数据均需你主动点击按钮才会采集，<b>不会自动联网</b>，以节省 Token / API 额度。未配置数据源时，请在各模块使用「新增」手动录入。</div>' +
@@ -1229,6 +1276,7 @@
     }
     node.querySelector('#addBtn').onclick = function () { editingId = null; buildForm({}); };
     node._refresh = refresh;
+    addClearButton(node, '🗑 清空', function () { return VHDB.clear('auth_records'); });
     bindAI(node, 'auth');
     bindAI(node, 'auth_checklist', function() {
       var selected = null;
@@ -1302,11 +1350,12 @@
       }).then(function () { node.querySelector('#newTask').value = ''; refresh(); });
     };
     node._refresh = refresh;
+    addClearButton(node, '🗑 清今日', function () { return VHDB.del('daily_plans', todayStr()); });
     bindAI(node, 'plan');
     return { node: node, refresh: refresh };
   }
 
-  // 每日热点
+  // 每日热点（三大分组：热搜组 / 视频组 / 音乐组）
   function buildHot() {
     var PLATFORM_META = {
       weibo: { label: '微博', color: '#e6162d', icon: '📺' },
@@ -1316,124 +1365,115 @@
     };
     var node = elFrom('<div class="module"><div class="mod-head"><h2>每日热点</h2>' +
       '<div class="mod-actions">' +
-      '<button class="btn btn-collect" id="cHot">🔥 采集今日热点</button>' +
-      '<button class="btn btn-collect" id="cVideo">🎬 采集热门视频</button>' +
-      '<button class="btn btn-collect" id="cAudio">🎧 采集热门音频</button>' +
+      '<button class="btn btn-collect" id="cHot">🔥 4平台实时热搜</button>' +
+      '<button class="btn btn-collect" id="cVideo">🎬 抖音热门视频</button>' +
+      '<button class="btn btn-collect" id="cAudio">🎧 抖音热门音乐</button>' +
+      '<button class="btn btn-danger" id="clearHot">🗑 清空</button>' +
       '</div></div>' +
-      '<div class="hint">数据来源：Cloudflare Worker（微博/抖音/B站/小红书热搜）。3个按钮均采集每平台最热门的前5条，按平台自动分组展示。也可手动添加。</div>' +
-      '<details class="form-wrap"><summary style="cursor:pointer;font-weight:600">＋ 手动添加视频</summary>' +
-      '<form id="vForm" style="margin-top:10px"><div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">' +
-      '<label>视频标题<input name="title"></label><label>视频链接<input name="link"></label>' +
-      '<label>作者名字<input name="author"></label><label>账号名称<input name="account"></label>' +
-      '<label>账号主页<input name="homepage"></label><label>点赞数量<input name="likes"></label>' +
-      '<label>评论数量<input name="comments"></label>' +
-      '<label>所属平台<select name="platform"><option value="">未指定</option>' +
-      Object.keys(PLATFORM_META).map(function(p) { return '<option value="' + p + '">' + PLATFORM_META[p].icon + ' ' + PLATFORM_META[p].label + '</option>'; }).join('') +
-      '</select></label></div>' +
-      '<label class="full" style="display:flex;flex-direction:column;gap:5px;margin-top:8px">爆火原因<textarea name="reason"></textarea></label>' +
-      '<div class="form-btns"><button class="btn btn-primary">添加</button></div></form></details>' +
-      '<div class="section-title">按平台分组</div><div id="pGroupList"></div>' +
-      '<div class="section-title">全部热门视频</div><div id="vList" class="list"></div>' +
-      '<div class="section-title">每日筛选 · 3 个热门账号</div><div id="aList" class="list"></div>' +
-      '<div class="section-title">热门音频</div><div id="auList" class="list"></div>' + aiSectionHTML('hot') + '</div>');
+      '<div class="hint">三个按钮分别采集三类数据，互不影响：<b>热搜组</b>=微博/抖音/B站/小红书实时热搜（按平台分组）；<b>视频组</b>=抖音实时热点（高播放内容）；<b>音乐组</b>=抖音实时热点（高频使用音频）。每条数据带「跳转」按钮，可一键打开对应平台 App / 网页查看。数据来自 Cloudflare Worker 代理。</div>' +
+      // 热搜组
+      '<div class="group-block"><div class="group-head" style="border-left:4px solid #e6162d">🔥 热搜组（按平台分组）</div><div id="pGroupList" class="list"></div></div>' +
+      // 视频组
+      '<div class="group-block"><div class="group-head" style="border-left:4px solid #161823">🎬 视频组（抖音实时热点 · 高播放）</div><div id="vList" class="list"></div></div>' +
+      // 音乐组
+      '<div class="group-block"><div class="group-head" style="border-left:4px solid #ff2442">🎧 音乐组（抖音实时热点 · 高频音频）</div><div id="auList" class="list"></div></div>' +
+      aiSectionHTML('hot') + '</div>');
+
+    // 平台跳转按钮（App scheme，失败回退网页）
+    function jumpBtns(platform, keyword) {
+      var app = platformAppLink(platform, keyword);
+      var web = platformWebLink(platform, keyword);
+      var meta = PLATFORM_META[platform] || { label: platform, icon: '🔗' };
+      var pTag = '<span class="tag" style="border-color:' + meta.color + ';color:' + meta.color + '">' + meta.icon + ' ' + meta.label + '</span>';
+      var html = pTag;
+      if (app) html += ' <a class="mini-btn" href="' + esc(app) + '" onclick="setTimeout(function(){window.open(\'' + esc(web) + '\',\'_blank\')},600)" >📱 打开App</a>';
+      html += ' <a class="mini-btn" href="' + esc(web) + '" target="_blank" rel="noopener">🌐 网页查看</a>';
+      return html;
+    }
+
+    function renderGroups(pGroupEl, groups, PLATFORM_META) {
+      var groupKeys = Object.keys(groups);
+      if (groupKeys.length) {
+        pGroupEl.innerHTML = groupKeys.map(function (p) {
+          var meta = PLATFORM_META[p] || { label: groups[p].label || p, color: '#888', icon: '📌' };
+          var items = groups[p].items || [];
+          return '<div class="platform-group-card" style="border-left:4px solid ' + meta.color + ';margin-bottom:14px;border-radius:8px;overflow:hidden">' +
+            '<div class="platform-group-header" style="background:var(--bg-2);padding:10px 14px;display:flex;align-items:center;gap:8px">' +
+            '<span style="font-size:1.2em">' + meta.icon + '</span>' +
+            '<b style="color:' + meta.color + '">' + esc(meta.label) + '</b>' +
+            '<span class="tag" style="margin-left:auto">' + items.length + '条热搜</span></div>' +
+            '<div style="padding:4px 0">' + items.map(function (item, idx) {
+              var kw = item.title || '';
+              return '<div class="item" style="padding:8px 14px;border-bottom:1px solid var(--line)">' +
+                '<div class="body" style="display:flex;gap:10px;align-items:center">' +
+                '<span style="font-size:1.1em;font-weight:700;color:' + meta.color + ';min-width:28px">#' + (idx + 1) + '</span>' +
+                '<div style="flex:1"><b>' + esc(kw) + '</b>' +
+                '<div class="meta">' + esc(item.reason || '') + '</div>' +
+                '<div class="meta">' + jumpBtns(p, kw) + '</div>' +
+                '</div></div></div>';
+            }).join('') + '</div></div>';
+        }).join('');
+      } else {
+        pGroupEl.innerHTML = '<div class="empty">暂无热搜数据，点击「4平台实时热搜」采集</div>';
+      }
+    }
 
     function refresh() {
       VHDB.get('hot_topics', todayStr()).then(function (rec) {
-        rec = rec || { videos: [], accounts: [], audios: [], platformGroups: {} };
-        var videos = rec.videos || [], accounts = rec.accounts || [], audios = rec.audios || [];
-        var groups = rec.platformGroups || {};
+        rec = rec || { hotSearch: {}, videos: [], audios: [] };
+        var hot = rec.hotSearch || {};
+        var videos = rec.videos || [];
+        var audios = rec.audios || [];
 
-        // 按平台分组展示
-        var pGroupEl = node.querySelector('#pGroupList');
-        var groupKeys = Object.keys(groups);
-        if (groupKeys.length) {
-          pGroupEl.innerHTML = groupKeys.map(function (p) {
-            var meta = PLATFORM_META[p] || { label: groups[p].label || p, color: '#888', icon: '📌' };
-            var items = groups[p].items || [];
-            return '<div class="platform-group-card" style="border-left:4px solid ' + meta.color + ';margin-bottom:14px;border-radius:8px;overflow:hidden">' +
-              '<div class="platform-group-header" style="background:var(--bg-2);padding:10px 14px;display:flex;align-items:center;gap:8px">' +
-              '<span style="font-size:1.2em">' + meta.icon + '</span>' +
-              '<b style="color:' + meta.color + '">' + esc(meta.label) + '</b>' +
-              '<span class="tag" style="margin-left:auto">' + items.length + '条热搜</span></div>' +
-              '<div style="padding:4px 0">' + items.map(function (item, idx) {
-                return '<div class="item" style="padding:8px 14px;border-bottom:1px solid var(--line)">' +
-                  '<div class="body" style="display:flex;gap:10px;align-items:center">' +
-                  '<span style="font-size:1.1em;font-weight:700;color:' + meta.color + ';min-width:28px">#' + (idx + 1) + '</span>' +
-                  '<div style="flex:1"><b>' + esc(item.title) + '</b>' +
-                  '<div class="meta">' + esc(item.reason || '') + '</div></div></div></div>';
-              }).join('') + '</div></div>';
-          }).join('');
-        } else {
-          // 没有分组数据，尝试从 videos 的 platform 字段重建分组
+        // 热搜组（按平台分组）
+        var groups = hot.platformGroups || {};
+        if (!Object.keys(groups).length && (hot.videos || []).length) {
+          // 兜底：从扁平 videos 重建分组
           var regrouped = {};
-          videos.forEach(function (v) {
+          (hot.videos || []).forEach(function (v) {
             var p = v.platform || 'other';
             if (!regrouped[p]) regrouped[p] = { label: (PLATFORM_META[p] || {}).label || v.account || p, items: [] };
             regrouped[p].items.push(v);
           });
-          var rKeys = Object.keys(regrouped);
-          if (rKeys.length && rKeys.some(function(k) { return k !== 'other'; })) {
-            pGroupEl.innerHTML = rKeys.filter(function(k) { return k !== 'other'; }).map(function (p) {
-              var meta = PLATFORM_META[p] || { label: regrouped[p].label, color: '#888', icon: '📌' };
-              var items = regrouped[p].items;
-              return '<div class="platform-group-card" style="border-left:4px solid ' + meta.color + ';margin-bottom:14px;border-radius:8px;overflow:hidden">' +
-                '<div class="platform-group-header" style="background:var(--bg-2);padding:10px 14px;display:flex;align-items:center;gap:8px">' +
-                '<span style="font-size:1.2em">' + meta.icon + '</span>' +
-                '<b style="color:' + meta.color + '">' + esc(meta.label) + '</b>' +
-                '<span class="tag" style="margin-left:auto">' + items.length + '条热搜</span></div>' +
-                '<div style="padding:4px 0">' + items.map(function (item, idx) {
-                  return '<div class="item" style="padding:8px 14px;border-bottom:1px solid var(--line)">' +
-                    '<div class="body" style="display:flex;gap:10px;align-items:center">' +
-                    '<span style="font-size:1.1em;font-weight:700;color:' + meta.color + ';min-width:28px">#' + (idx + 1) + '</span>' +
-                    '<div style="flex:1"><b>' + esc(item.title) + '</b>' +
-                    '<div class="meta">' + esc(item.reason || '') + '</div></div></div></div>';
-                }).join('') + '</div></div>';
-            }).join('');
-          } else {
-            pGroupEl.innerHTML = '<div class="empty">暂无分组数据，点击「采集」获取</div>';
-          }
+          groups = regrouped;
         }
+        renderGroups(node.querySelector('#pGroupList'), groups, PLATFORM_META);
 
-        // 全部视频列表
+        // 视频组（抖音）
         node.querySelector('#vList').innerHTML = videos.length ? videos.map(function (v) {
-          var pMeta = v.platform ? PLATFORM_META[v.platform] : null;
-          var pTag = pMeta ? '<span class="tag" style="border-color:' + pMeta.color + ';color:' + pMeta.color + '">' + pMeta.icon + ' ' + pMeta.label + '</span>' : '';
-          return '<div class="item"><div class="body"><b>' + esc(v.title) + '</b> ' + pTag +
-            '<div class="meta">' + esc([v.author, v.account].filter(Boolean).join(' · ')) + '</div>' +
-            '<div class="meta">👍 ' + esc(v.likes) + ' · 💬 ' + esc(v.comments) + '</div>' +
-            '<div class="meta">爆火原因：' + esc(v.reason) + '</div>' +
-            (v.link ? '<div class="meta"><a href="' + esc(v.link) + '" target="_blank" rel="noopener">查看视频</a></div>' : '') +
-            (v.homepage ? '<div class="meta"><a href="' + esc(v.homepage) + '" target="_blank" rel="noopener">账号主页</a></div>' : '') +
-            '</div></div>';
-        }).join('') : '<div class="empty">暂无，点击「采集」或手动添加</div>';
-        node.querySelector('#aList').innerHTML = accounts.length ? accounts.slice(0, 3).map(function (a) {
-          var pMeta = a.platform ? PLATFORM_META[a.platform] : null;
-          var pTag = pMeta ? '<span class="tag" style="border-color:' + pMeta.color + ';color:' + pMeta.color + '">' + pMeta.icon + ' ' + pMeta.label + '</span>' : '';
-          return '<div class="item"><div class="body"><b>' + esc(a.author) + '</b> ' + pTag +
-            '<div class="meta">内容方向：' + esc(a.dir) + '</div></div></div>';
-        }).join('') : '<div class="empty">暂无</div>';
+          var cover = v.cover ? '<img src="' + esc(v.cover) + '" class="news-thumb" alt="" onerror="this.style.display=\'none\'">' : '';
+          var stats = [v.playCount ? ('▶️ ' + esc(v.playCount)) : '', v.likeCount ? ('👍 ' + esc(v.likeCount)) : ''].filter(Boolean).join(' · ');
+          return '<div class="item"><div class="body" style="display:flex;gap:10px;align-items:flex-start">' + cover +
+            '<div style="flex:1"><b>' + esc(v.rank ? ('#' + v.rank + ' ') : '') + esc(v.title) + '</b>' +
+            (v.author ? '<div class="meta">作者：' + esc(v.author) + '</div>' : '') +
+            (stats ? '<div class="meta">' + stats + '</div>' : '') +
+            (v.desc ? '<div class="meta">' + esc(v.desc) + '</div>' : '') +
+            '<div class="meta">' + jumpBtns('douyin', v.title || '') + '</div>' +
+            '</div></div></div>';
+        }).join('') : '<div class="empty">暂无，点击「抖音热门视频」采集</div>';
+
+        // 音乐组（抖音）
         node.querySelector('#auList').innerHTML = audios.length ? audios.map(function (a) {
-          var pMeta = a.platform ? PLATFORM_META[a.platform] : null;
-          var pTag = pMeta ? '<span class="tag" style="border-color:' + pMeta.color + ';color:' + pMeta.color + '">' + pMeta.icon + ' ' + pMeta.label + '</span>' : '';
-          return '<div class="item"><div class="body"><b>' + esc(a.name) + '</b> ' + pTag +
-            '<div class="meta">使用情况：' + esc(a.usage) + ' · 热门原因：' + esc(a.reason) + '</div></div></div>';
-        }).join('') : '<div class="empty">暂无</div>';
+          var cover = a.cover ? '<img src="' + esc(a.cover) + '" class="news-thumb" alt="" onerror="this.style.display=\'none\'">' : '';
+          var stats = [a.useCount ? ('🎶 使用 ' + esc(a.useCount)) : ''].filter(Boolean).join(' · ');
+          return '<div class="item"><div class="body" style="display:flex;gap:10px;align-items:flex-start">' + cover +
+            '<div style="flex:1"><b>' + esc(a.rank ? ('#' + a.rank + ' ') : '') + esc(a.title) + '</b>' +
+            (a.singer ? '<div class="meta">歌手：' + esc(a.singer) + '</div>' : '') +
+            (stats ? '<div class="meta">' + stats + '</div>' : '') +
+            (a.desc ? '<div class="meta">' + esc(a.desc) + '</div>' : '') +
+            '<div class="meta">' + jumpBtns('douyin', a.title || '') + '</div>' +
+            '</div></div></div>';
+        }).join('') : '<div class="empty">暂无，点击「抖音热门音乐」采集</div>';
       });
     }
     node.querySelector('#cHot').onclick = function () { collectHot().then(refresh).catch(function (e) { toast('采集失败：' + e.message, 'err'); refresh(); }); };
-    node.querySelector('#cVideo').onclick = function () { collectHot().then(refresh).catch(function (e) { toast('采集失败：' + e.message, 'err'); refresh(); }); };
+    node.querySelector('#cVideo').onclick = function () { collectVideo().then(refresh).catch(function (e) { toast('采集失败：' + e.message, 'err'); refresh(); }); };
     node.querySelector('#cAudio').onclick = function () { collectAudio().then(refresh).catch(function (e) { toast('采集失败：' + e.message, 'err'); refresh(); }); };
-    node.querySelector('#vForm').onsubmit = function (e) {
-      e.preventDefault(); var f = e.target; var v = {
-        title: f.title.value, link: f.link.value, author: f.author.value, account: f.account.value,
-        homepage: f.homepage.value, likes: f.likes.value, comments: f.comments.value, reason: f.reason.value,
-        platform: f.platform.value
-      };
-      VHDB.get('hot_topics', todayStr()).then(function (rec) {
-        rec = rec || { date: todayStr(), accounts: [], audios: [] };
-        rec.videos = rec.videos || []; rec.videos.unshift(v);
-        return VHDB.put('hot_topics', rec);
-      }).then(function () { f.reset(); toast('已添加', 'ok'); refresh(); });
+    node.querySelector('#clearHot').onclick = function () {
+      if (!confirm('确认清空今日热点的全部数据（热搜组+视频组+音乐组）？')) return;
+      VHDB.put('hot_topics', { date: todayStr(), hotSearch: {}, videos: [], audios: [] }).then(function () {
+        toast('已清空今日热点', 'ok'); refresh();
+      });
     };
     node._refresh = refresh;
     bindAI(node, 'hot');
@@ -1460,22 +1500,40 @@
     function refresh() {
       VHDB.get('music_news', todayStr()).then(function (rec) {
         var items = rec && rec.items ? rec.items : [];
-        node.querySelector('#nList').innerHTML = items.length ? items.map(function (it) {
-          var thumb = it.cover
-            ? '<img src="' + esc(it.cover) + '" class="news-thumb" alt="" onerror="this.style.display=\'none\'">'
-            : '';
-          return '<div class="item"><div class="body" style="display:flex;gap:10px;align-items:flex-start">' + thumb +
-            '<div style="flex:1"><b>' + esc(it.artist) + '</b> — ' + esc(it.album) +
-            ' <span class="tag">' + esc(it.region) + '</span> <span class="tag">' + esc(it.format) + '</span>' +
-            (it.source ? ' <span class="tag">' + esc(it.source) + '</span>' : '') +
-            '<div class="meta">发布：' + esc(it.releaseDate) + ' · 售价：' + esc(it.price || '—') + ' · 预售价格：' + esc(it.presalePrice || '—') + '</div>' +
-            '<div class="meta">' + esc(it.company || '') + (it.country ? ' / ' + esc(it.country) : '') + '</div>' +
-            '<div class="meta">' + (it.buyLink ? '<a href="' + esc(it.buyLink) + '" target="_blank" rel="noopener">购买</a> ' : '') + (it.srcLink ? '<a href="' + esc(it.srcLink) + '" target="_blank" rel="noopener">来源</a>' : '') + '</div>' +
-            '</div></div></div>';
-        }).join('') : '<div class="empty">暂无，点击「采集」或手动添加</div>';
+        if (!items.length) { node.querySelector('#nList').innerHTML = '<div class="empty">暂无，点击「采集」或手动添加</div>'; return; }
+        // 按地区分组，结构更清晰
+        var byRegion = {};
+        items.forEach(function (it) {
+          var r = it.region || '其他';
+          if (!byRegion[r]) byRegion[r] = [];
+          byRegion[r].push(it);
+        });
+        var regionColor = { '日本': '#2b4a3e', '韩国': '#1a5276', '美国': '#922b21', '欧洲': '#6c3483', '中国港台': '#b9770e', '中国内地': '#117a65', '其他': '#7f8c8d' };
+        node.querySelector('#nList').innerHTML = Object.keys(byRegion).map(function (r) {
+          var color = regionColor[r] || '#7f8c8d';
+          return '<div class="group-block"><div class="group-head" style="border-left:4px solid ' + color + '">' + esc(r) + '（' + byRegion[r].length + '）</div><div class="news-grid">' +
+            byRegion[r].map(function (it) {
+              var thumb = it.cover
+                ? '<img src="' + esc(it.cover) + '" class="news-thumb" alt="" onerror="this.style.display=\'none\'">'
+                : '<div class="noimg">🎵</div>';
+              var price = it.presalePrice || it.price || '—';
+              return '<div class="news-card">' +
+                '<div class="news-cover">' + thumb + (it.format ? '<span class="news-fmt">' + esc(it.format) + '</span>' : '') + '</div>' +
+                '<div class="news-info"><b>' + esc(it.artist) + '</b> — ' + esc(it.album) + '</div>' +
+                '<div class="meta">发布：' + esc(it.releaseDate || '—') + '</div>' +
+                '<div class="meta">公司：' + esc(it.company || '—') + (it.country ? ' / ' + esc(it.country) : '') + '</div>' +
+                '<div class="meta">预售/售价：<b>' + esc(price) + '</b>' + (it.source ? ' <span class="tag">' + esc(it.source) + '</span>' : '') + '</div>' +
+                '<div class="news-links">' +
+                (it.buyLink ? '<a class="mini-btn" href="' + esc(it.buyLink) + '" target="_blank" rel="noopener">🛒 购买</a>' : '') +
+                (it.srcLink ? '<a class="mini-btn" href="' + esc(it.srcLink) + '" target="_blank" rel="noopener">🔗 来源</a>' : '') +
+                '</div></div>';
+            }).join('') +
+            '</div></div>';
+        }).join('');
       });
     }
     node.querySelector('#cNews').onclick = function () { collectMusicNews().then(refresh).catch(function (e) { toast('采集失败：' + e.message, 'err'); refresh(); }); };
+    addClearButton(node, '🗑 清空', function () { return VHDB.put('music_news', { date: todayStr(), items: [] }); });
     node.querySelector('#nForm').onsubmit = function (e) {
       e.preventDefault(); var f = e.target; var it = {
         region: f.region.value, artist: f.artist.value, album: f.album.value, releaseDate: f.releaseDate.value,
@@ -1552,6 +1610,7 @@
         node.querySelector('#convRes').textContent = amt + ' ' + fromCur + ' = ' + result.toFixed(2) + ' ' + toCur + '  (' + rateText + ')';
       });
     };
+    addClearButton(node, '🗑 清汇率', function () { return VHDB.clear('exchange_rates'); });
     node._refresh = refresh;
     bindAI(node, 'fx');
     return { node: node, refresh: refresh };
@@ -1708,6 +1767,7 @@
     search.oninput = refresh;
     filter.onchange = refresh;
     node._refresh = refresh;
+    addClearButton(node, '🗑 清空', function () { return VHDB.clear('websites'); });
     bindAI(node, 'websites');
     return { node: node, refresh: refresh };
   }
@@ -1950,6 +2010,7 @@
       discogsInfo.classList.add('hidden'); discogsInfo.innerHTML = '';
     };
     node._refresh = refresh; refresh();
+    addClearButton(node, '🗑 清空分析', function () { return VHDB.clear('full_analysis'); });
     bindAI(node, 'analysis', function () {
       var form = node.querySelector('#aForm');
       if (!form) return {};
@@ -2000,13 +2061,17 @@
           if (!list.length) { resultsEl.innerHTML = '<div class="empty">未找到相关结果。</div>'; return; }
           resultsEl.innerHTML = '<div class="list">' + list.map(function (it, i) {
             var cover = it.cover ? '<img src="' + esc(it.cover) + '" alt="" style="width:54px;height:54px;object-fit:cover;border-radius:6px">' : '<div class="noimg">💿</div>';
+            var catHtml = it.catalog
+              ? '<span class="cat-no">' + esc(it.catalog) + '</span>'
+              : '<span class="cat-no cat-missing">未显示编号</span>';
+            var fillBtn = it.catalog ? '' : '<button class="btn btn-sm btn-fill" data-fill="' + i + '">补查编号</button>';
             return '<div class="item"><div class="body" style="display:flex;gap:12px;align-items:center">' + cover +
               '<div style="flex:1"><b>' + esc(it.artist || '') + (it.album ? ' — ' + esc(it.album) : '') + '</b>' +
-              '<div class="meta">' + esc([it.year, it.country, it.catalog].filter(Boolean).join(' · ')) + '</div>' +
+              '<div class="meta">' + esc([it.year, it.country].filter(Boolean).join(' · ')) + ' · ' + catHtml + '</div>' +
               '<div class="meta">' + esc(it.version || '') + '</div></div>' +
               '<div class="row-actions"><button class="btn btn-sm" data-detail="' + i + '">查看详情</button>' +
               '<button class="btn btn-sm" data-ana="' + i + '">进入全分析</button>' +
-              '<button class="btn btn-sm btn-primary" data-save="' + i + '">保存到库存</button></div></div></div>';
+              '<button class="btn btn-sm btn-primary" data-save="' + i + '">保存到库存</button>' + fillBtn + '</div></div></div>';
           }).join('') + '</div>';
           $$('[data-detail]', resultsEl).forEach(function (btn) {
             btn.onclick = function () { showDetail(Number(btn.dataset.detail), cfg); };
@@ -2016,6 +2081,25 @@
           });
           $$('[data-ana]', resultsEl).forEach(function (btn) {
             btn.onclick = function () { sendToAnalysis(list[Number(btn.dataset.ana)]); };
+          });
+          $$('[data-fill]', resultsEl).forEach(function (btn) {
+            btn.onclick = function () {
+              var idx = Number(btn.dataset.fill); var it = list[idx];
+              if (!it.id) { toast('该结果无编号可补查', 'err'); return; }
+              btn.disabled = true; btn.textContent = '补查中…';
+              VHAPI.fetchDiscogsRelease(it.id, cfg.discogsToken, cfg.discogsProxy).then(function (d) {
+                if (d && d.catalog) {
+                  it.catalog = d.catalog; it.label = d.label || it.label;
+                  // 更新卡片显示
+                  var cardMeta = btn.closest('.item').querySelector('.cat-no');
+                  if (cardMeta) { cardMeta.textContent = d.catalog; cardMeta.className = 'cat-no'; }
+                  btn.remove();
+                  toast('已补查编号：' + d.catalog, 'ok');
+                } else {
+                  toast('详情中仍未包含编号', 'err'); btn.disabled = false; btn.textContent = '补查编号';
+                }
+              }).catch(function (e) { toast('补查失败：' + e.message, 'err'); btn.disabled = false; btn.textContent = '补查编号'; });
+            };
           });
         });
       }).catch(function (e) { toast('查询失败：' + e.message, 'err'); })
@@ -2109,6 +2193,11 @@
     }
 
     node._refresh = function () {};
+    addClearButton(node, '🗑 清查询', function () {
+      currentResults = []; selected = null;
+      resultsEl.innerHTML = '<div class="empty">已清空查询结果与详情。</div>';
+      detailEl.innerHTML = '<div class="empty">点击某条结果「查看详情」查看完整资料。</div>';
+    });
     bindAI(node, 'discogs', function () { return selected || {}; });
     return { node: node, refresh: function () {} };
   }
@@ -2239,6 +2328,7 @@
     search.oninput = refresh;
     filter.onchange = refresh;
     node._refresh = refresh;
+    addClearButton(node, '🗑 清空库存', function () { return VHDB.clear('inventory'); });
     bindAI(node, 'inventory');
     bindAI(node, 'inventory_value');
     return { node: node, refresh: refresh };
@@ -2346,6 +2436,7 @@
     node.querySelector('#addBtn').onclick = function () { editingId = null; buildCustForm({}); };
     node.querySelector('#addBuy').onclick = buildBuyForm;
     node._refresh = refresh;
+    addClearButton(node, '🗑 清空客户', function () { return VHDB.clear('crm'); });
     bindAI(node, 'crm');
     return { node: node, refresh: refresh };
   }

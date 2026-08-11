@@ -452,3 +452,29 @@ details.form-wrap summary::-webkit-details-marker { display: none; }
 .diag-verdict.good { background: #e8f5e9; color: #1b5e20; }
 .diag-verdict.warn { background: #fff8e1; color: #8a6d00; }
 .diag-verdict.bad { background: #fbe9e7; color: #c62828; }
+
+/* 分组块（每日热点三大组 / 音乐资讯按地区） */
+.group-block { margin: 14px 0; }
+.group-head { font-weight: 700; padding: 8px 12px; background: var(--bg-2); border-radius: 6px 6px 0 0; color: var(--text); font-size: 14px; }
+.group-block .list { border: 1px solid var(--line); border-top: none; border-radius: 0 0 8px 8px; }
+
+/* 平台 / 网页跳转小按钮 */
+.mini-btn { display: inline-block; margin-left: 6px; padding: 2px 8px; font-size: 12px; line-height: 1.6; border-radius: 6px; background: var(--accent); color: #fff; text-decoration: none; }
+.mini-btn:hover { opacity: .9; }
+
+/* 音乐资讯卡片网格 */
+.news-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 12px; padding: 12px; }
+.news-card { border: 1px solid var(--line); border-radius: 8px; padding: 10px; background: var(--card); }
+.news-cover { position: relative; width: 100%; height: 140px; border-radius: 6px; overflow: hidden; background: var(--bg-2); display: flex; align-items: center; justify-content: center; }
+.news-cover img { width: 100%; height: 100%; object-fit: cover; }
+.news-fmt { position: absolute; right: 6px; bottom: 6px; background: rgba(0,0,0,.6); color: #fff; font-size: 11px; padding: 1px 6px; border-radius: 6px; }
+.news-info { font-weight: 600; margin: 8px 0 4px; font-size: 13px; }
+.news-links { margin-top: 8px; display: flex; gap: 6px; flex-wrap: wrap; }
+
+/* Discogs 编号高亮 */
+.cat-no { display: inline-block; padding: 1px 7px; border-radius: 5px; background: var(--accent); color: #fff; font-size: 12px; }
+.cat-no.cat-missing { background: #b04a4a; }
+.btn-fill { background: #5a7d6b; }
+
+/* 平台分组卡片（每日热点热搜组已内联，这里补充 list 间距） */
+.platform-group-card .item { border-bottom: 1px solid var(--line); }

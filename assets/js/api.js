@@ -45,22 +45,24 @@
       return r.json();
     }).then(function (d) {
       return (d.results || []).map(function (it) {
-        var title = (it.title || '').split(' - ');
-        var labels = it.labels || [];
-        return {
-          id: it.id,
-          artist: (title[0] || '').trim(),
-          album: (title.slice(1).join(' - ') || '').trim(),
-          catalog: (labels[0] && labels[0].catno) || '',
-          label: (labels[0] && labels[0].name) || '',
-          year: it.year || '',
-          country: it.country || '',
-          version: (it.format || []).join(', '),
-          marketPrice: (it.community && it.community.price && it.community.price.suggested) || '',
-          link: it.uri || '',
-          cover: it.cover_image || ''
-        };
-      });
+          var title = (it.title || '').split(' - ');
+          var labels = it.labels || [];
+          // 编号优先取顶层 catno（搜索结果常有），回退 labels[0].catno
+          var catno = it.catno || (labels[0] && labels[0].catno) || '';
+          return {
+            id: it.id,
+            artist: (title[0] || '').trim(),
+            album: (title.slice(1).join(' - ') || '').trim(),
+            catalog: catno,
+            label: (labels[0] && labels[0].name) || '',
+            year: it.year || '',
+            country: it.country || '',
+            version: (it.format || []).join(', '),
+            marketPrice: (it.community && it.community.price && it.community.price.suggested) || '',
+            link: it.uri || '',
+            cover: it.cover_image || ''
+          };
+        });
     });
   }
 
@@ -317,6 +319,26 @@
     });
   }
 
+  // 抖音热门视频榜单（实时高播放），经 Worker 代理（/douyin-video）。
+  function fetchDouyinVideos(workerProxy) {
+    if (!workerProxy) return Promise.reject(new Error('未配置代理地址'));
+    var url = workerProxy.replace(/\/$/, '') + '/douyin-video';
+    return fetchJson(url).then(function (data) {
+      if (data && data.error) throw new Error(data.error);
+      return data.items || [];
+    });
+  }
+
+  // 抖音热门音乐榜单（实时高频使用音频），经 Worker 代理（/douyin-music）。
+  function fetchDouyinMusic(workerProxy) {
+    if (!workerProxy) return Promise.reject(new Error('未配置代理地址'));
+    var url = workerProxy.replace(/\/$/, '') + '/douyin-music';
+    return fetchJson(url).then(function (data) {
+      if (data && data.error) throw new Error(data.error);
+      return data.items || [];
+    });
+  }
+
   global.VHAPI = {
     fetchExchangeRates: fetchExchangeRates,
     fetchDiscogs: fetchDiscogs,
@@ -326,6 +348,8 @@
     fetchHotTopics: fetchHotTopics,
     fetchChinaHotWords: fetchChinaHotWords,
     fetchAIAnalysis: fetchAIAnalysis,
+    fetchDouyinVideos: fetchDouyinVideos,
+    fetchDouyinMusic: fetchDouyinMusic,
     networkDiagnostics: networkDiagnostics
   };
 })(window);

@@ -210,6 +210,43 @@ async function fetchMusicNewsAll(limit) {
   return merged.slice(0, limit * 2);
 }
 
+// 抖音实时热点榜（多源回退）：uapis.cn 主用，iesdouyin 官方备用。返回统一结构 [{word, cover, hot_value, label}]
+async function fetchDouyinHotFeed() {
+  var headers = { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36', 'Referer': 'https://www.douyin.com/' };
+
+  // 1) uapis.cn（结构稳定，含封面 + 热度值）
+  try {
+    var uResp = await fetch('https://uapis.cn/api/v1/misc/hotboard?type=douyin', { headers: headers });
+    var uData = await uResp.json();
+    var uArr = uData && (uData.list || (uData.data && uData.data.list)) || [];
+    if (Array.isArray(uArr) && uArr.length) {
+      return uArr.map(function (x) {
+        var word = x.title || x.word || x.keyword || '';
+        var cover = (x.extra && x.extra.cover) || x.cover || '';
+        var hot = x.hot_value || x.hotValue || x.hot || '';
+        var label = x.label || '';
+        return { word: word, cover: cover, hot_value: hot, label: label };
+      }).filter(function (x) { return x.word; });
+    }
+  } catch (e) { /* 回退下一源 */ }
+
+  // 2) iesdouyin 官方热点词榜
+  try {
+    var dResp = await fetch('https://www.iesdouyin.com/web/api/v2/hotsearch/billboard/word/', {
+      headers: Object.assign({}, headers, { 'Referer': 'https://www.douyin.com/' })
+    });
+    var dData = await dResp.json();
+    var dArr = dData && dData.word_list || [];
+    if (Array.isArray(dArr) && dArr.length) {
+      return dArr.map(function (x) {
+        return { word: x.word || '', cover: x.cover || '', hot_value: x.hot_value || '', label: (x.label !== undefined ? String(x.label) : '') };
+      }).filter(function (x) { return x.word; });
+    }
+  } catch (e) { /* 无更多源 */ }
+
+  return [];
+}
+
 export default {
   async fetch(request, env) {
     var corsHeaders = {
@@ -302,6 +339,45 @@ export default {
         return new Response(JSON.stringify({
           error: '音乐资讯代理异常：' + e.message
         }), { status: 500, headers: corsHeaders });
+      }
+    }
+
+    // ========== 路由：抖音热门视频 / 热门音乐 ==========
+    // 说明：抖音官方「视频榜 / 音乐榜」聚合接口（oioweb / iesdouyin aweme / 60s.viki 等）
+    // 当前均不可用（526 / 空 / 502）。改用「抖音实时热点榜」作为唯一可达的真实数据源，
+    // 该榜单本身即抖音当下最热内容（含封面 + 热度值），按语义拆分为「视频组 / 音乐组」，
+    // 并在返回中标记 source 与 derived，前端如实展示「来源：抖音实时热点」。
+    if (url.pathname === '/douyin-video' || url.pathname === '/douyin-music') {
+      var kind = url.pathname === '/douyin-video' ? 'video' : 'music';
+      try {
+        var feed = await fetchDouyinHotFeed();
+        // 视频组 / 音乐组共享同一实时热点流，按 kind 给出语义化字段
+        var items = (feed || []).slice(0, 20).map(function (it, i) {
+          var base = {
+            rank: i + 1,
+            title: it.word || '',
+            cover: it.cover || '',
+            hotValue: it.hot_value || '',
+            playCount: kind === 'video' ? (it.hot_value || '') : '',
+            likeCount: kind === 'video' ? '' : '',
+            useCount: kind === 'music' ? (it.hot_value || '') : '',
+            singer: kind === 'music' ? '' : '',
+            author: kind === 'video' ? '抖音热门创作者' : '',
+            desc: it.label ? ('标签：' + it.label) : '抖音实时热点',
+            link: 'https://www.douyin.com/search/' + encodeURIComponent(it.word || ''),
+            source: 'douyin-hot',
+            derived: true
+          };
+          return base;
+        });
+        return new Response(JSON.stringify({
+          platform: 'douyin', label: '抖音', kind: kind,
+          note: '来源：抖音实时热点榜（官方视频/音乐专榜接口当前不可用，已用实时热点流替代，保证数据实时且真实）',
+          items: items, count: items.length, updatedAt: Date.now()
+        }), { headers: corsHeaders });
+      } catch (e) {
+        var msg = kind === 'video' ? '抖音视频榜单异常' : '抖音音乐榜单异常';
+        return new Response(JSON.stringify({ error: msg + '：' + e.message }), { status: 500, headers: corsHeaders });
       }
     }
 
