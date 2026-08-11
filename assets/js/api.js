@@ -216,6 +216,15 @@
     });
   }
 
+  // 单平台实时热搜：仅采集指定平台的实时热点（?platform=weibo/douyin/bilibili/xiaohongshu）。
+  // 返回 { platform, label, color, words:[...], count, updatedAt }
+  function fetchPlatformHot(workerProxy, platform) {
+    if (!workerProxy) return Promise.reject(new Error('未配置热搜代理地址'));
+    if (!platform) return Promise.reject(new Error('未指定平台'));
+    var url = workerProxy.replace(/\/$/, '') + '/hot?platform=' + encodeURIComponent(platform);
+    return fetchJson(url);
+  }
+
   // 中国热度信号：经用户自部署的代理（Cloudflare Worker 等）拉取微博/抖音热搜词。
   // 代理需返回标准化 { words: ["词1","词2",...] }（也兼容微博 {data:{realtime:[{word}]}}、
   // 抖音 {word_list:[{word}]} 等格式）。代理负责解决浏览器跨域(CORS)。

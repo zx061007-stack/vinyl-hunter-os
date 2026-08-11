@@ -44,6 +44,42 @@
   --shadow: 0 8px 28px rgba(0, 0, 0, .35);
 }
 
+/* ---------- 海洋蓝 ---------- */
+[data-theme="ocean"] {
+  --bg: #eaf2f6; --bg-2: #dde9f0; --panel: #ffffff; --panel-2: #e8f0f5;
+  --line: #cfe0ea; --text: #1f3a47; --muted: #6b8a99;
+  --accent: #1f6f8b; --accent-ink: #185b73; --accent-2: #e08a3c;
+  --good: #3f9b87; --warn: #d39a3e; --bad: #c2695a;
+  --shadow: 0 8px 28px rgba(31, 111, 139, .12);
+}
+
+/* ---------- 暖橘粉 ---------- */
+[data-theme="sunset"] {
+  --bg: #fbeee6; --bg-2: #f6e0d4; --panel: #fffaf6; --panel-2: #fbe7dc;
+  --line: #f0d3c4; --text: #4a2f28; --muted: #a9806f;
+  --accent: #c8572f; --accent-ink: #a8461f; --accent-2: #e08aa0;
+  --good: #7a9b6f; --warn: #d99a3e; --bad: #bf5a52;
+  --shadow: 0 8px 28px rgba(200, 87, 47, .12);
+}
+
+/* ---------- 森野绿 ---------- */
+[data-theme="forest"] {
+  --bg: #eef3e9; --bg-2: #e1ebd9; --panel: #fbfdf8; --panel-2: #e8f0e1;
+  --line: #d2e0c7; --text: #2b3a26; --muted: #6f8463;
+  --accent: #4a7c3f; --accent-ink: #3a6331; --accent-2: #cf7a33;
+  --good: #5a9b6f; --warn: #c9a23e; --bad: #bf6a52;
+  --shadow: 0 8px 28px rgba(74, 124, 63, .12);
+}
+
+/* ---------- 极简灰 ---------- */
+[data-theme="mono"] {
+  --bg: #f2f2f2; --bg-2: #e8e8e8; --panel: #ffffff; --panel-2: #efefef;
+  --line: #e0e0e0; --text: #2a2a2a; --muted: #888888;
+  --accent: #444444; --accent-ink: #2a2a2a; --accent-2: #777777;
+  --good: #5a8a6f; --warn: #c9a23e; --bad: #b56a5a;
+  --shadow: 0 8px 28px rgba(0, 0, 0, .10);
+}
+
 * { box-sizing: border-box; }
 html, body { height: 100%; }
 body {
@@ -478,3 +514,50 @@ details.form-wrap summary::-webkit-details-marker { display: none; }
 
 /* 平台分组卡片（每日热点热搜组已内联，这里补充 list 间距） */
 .platform-group-card .item { border-bottom: 1px solid var(--line); }
+
+/* ---------- 自定义工作台背景图 ---------- */
+body.has-custom-bg { background-size: cover; background-position: center; background-attachment: fixed; background-repeat: no-repeat; }
+body.has-custom-bg::before {
+  content: ''; position: fixed; inset: 0; z-index: -1; pointer-events: none;
+  background: rgba(255, 255, 255, .80);
+}
+[data-theme="dark"] body.has-custom-bg::before { background: rgba(18, 24, 22, .78); }
+
+/* 背景图设置区 */
+.bg-block { border: 1px dashed var(--line); border-radius: 10px; padding: 10px 12px; margin-bottom: 10px; }
+.bg-prev { margin-top: 8px; }
+.bg-prev img { max-width: 220px; border-radius: 8px; box-shadow: var(--shadow); }
+
+/* ---------- AI 使用次数小角标（各模块标题右侧） ---------- */
+.ai-count-badge {
+  display: inline-block; margin-left: 10px; padding: 2px 9px;
+  font-size: 12px; font-weight: 600; border-radius: 20px;
+  background: var(--accent-2); color: #fff; vertical-align: middle;
+  letter-spacing: .3px;
+}
+
+/* ---------- AI 使用记录模块 --- 占比条 ---------- */
+.mini-bar { height: 8px; background: var(--bg-2); border-radius: 6px; margin-top: 6px; overflow: hidden; }
+.mini-bar-fill { height: 100%; background: linear-gradient(90deg, var(--accent), var(--accent-2)); transition: width .3s; }
+
+/* ---------- Discogs 行内详情 ---------- */
+.discogs-detail-inline { margin: 4px 0 10px; padding-left: 16px; border-left: 3px solid var(--accent); }
+.discogs-detail-inline .card { margin-top: 8px; }
+
+/* 图片缩略图（查看 / 保存） */
+.thumbs { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 8px; }
+.thumb-wrap { position: relative; }
+.thumb-img { width: 84px; height: 84px; object-fit: cover; border-radius: 8px; cursor: pointer; border: 1px solid var(--line); transition: transform .12s; }
+.thumb-img:hover { transform: scale(1.04); }
+.thumb-acts { position: absolute; bottom: 4px; left: 4px; right: 4px; display: flex; gap: 4px; opacity: 0; transition: opacity .15s; }
+.thumb-wrap:hover .thumb-acts { opacity: 1; }
+.thumb-acts .btn { padding: 2px 6px; font-size: 11px; }
+
+/* ---------- 图片灯箱 ---------- */
+.lightbox {
+  position: fixed; inset: 0; background: rgba(0, 0, 0, .85);
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  z-index: 9999; padding: 24px;
+}
+.lightbox-img { max-width: 92vw; max-height: 80vh; border-radius: 10px; box-shadow: 0 10px 40px rgba(0, 0, 0, .5); }
+.lightbox-bar { margin-top: 14px; display: flex; gap: 10px; }

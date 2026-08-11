@@ -381,6 +381,28 @@ export default {
       }
     }
 
+    // ========== 路由：单平台热搜（?platform=weibo/douyin/bilibili/xiaohongshu）==========
+    // 用于「每日热点」模块的 4 个平台按钮：每个按钮只采集该平台的实时热点。
+    if ((url.pathname === '/' || url.pathname === '/hot') && url.searchParams.get('platform')) {
+      var sp = url.searchParams.get('platform');
+      if (!PLATFORMS[sp]) {
+        return new Response(JSON.stringify({ error: '未知平台：' + sp }), { status: 400, headers: corsHeaders });
+      }
+      try {
+        var spWords = await fetchPlatform(sp);
+        return new Response(JSON.stringify({
+          platform: sp,
+          label: PLATFORMS[sp].label,
+          color: PLATFORMS[sp].color,
+          words: spWords.slice(0, 10),
+          count: spWords.length,
+          updatedAt: Date.now()
+        }), { headers: corsHeaders });
+      } catch (e) {
+        return new Response(JSON.stringify({ error: '采集失败：' + e.message }), { status: 500, headers: corsHeaders });
+      }
+    }
+
     // ========== 路由：4平台热搜（每平台前5）==========
     var platformList = Object.keys(PLATFORMS);
     var promises = platformList.map(function (p) {
